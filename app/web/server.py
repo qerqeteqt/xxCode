@@ -242,6 +242,14 @@ def create_app(root: str | Path) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("root: %s", project_root)
+        # 把装配好的工具名列出来。CLI 那边一直有这一行，web 这边漏了 ——
+        # 结果「模型说它没有某个工具」时，你得先猜是没注册还是模型没用
+        probe = build_default_registry(
+            project_root,
+            llm=object(),  # 只为拿名字，不真跑
+            tavily_api_key=get_settings().tavily_api_key,
+        )
+        logger.info("已注册工具: %s", ", ".join(t.name for t in probe.list_tools()))
         yield
         for live in live_sessions.values():
             await live.close()

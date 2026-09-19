@@ -262,6 +262,9 @@
       color-mix(in srgb, var(--err) 15%, transparent),
       color-mix(in srgb, var(--err) 3%, transparent));
   }
+  /* 记忆写入用强调色，和报错的红区分开 —— 它是个好事情 */
+  .note.memo { border-left-color: var(--accent); background: var(--grad-bubble); }
+  .memo-files { font-size: 12px; color: var(--dim); margin-top: 4px; }
   .note .partial { color: var(--dim); font-size: 13px; white-space: pre-wrap;
                    margin-top: 8px; max-height: 240px; overflow: auto; }
   .meta { color: var(--dim); font-size: 12px; margin: 10px 0 0; }
@@ -307,6 +310,10 @@
     border-radius: 6px; padding: 7px 10px; font-family: inherit; font-size: 13px;
   }
   .field input:focus { outline: none; border-color: var(--accent); }
+  .switch {
+    display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;
+  }
+  .switch input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
   .seg { display: flex; gap: 6px; }
   .seg button { flex: 1; }
   .seg button.on { border-color: var(--accent); color: var(--accent); }
@@ -395,6 +402,9 @@
 /* 字段说明放前端而不是后端：「怎么解释这个配置」是给人看的文案，
    和「能不能改」（后端 EDITABLE_KEYS 白名单）是两件事。 */
 const FIELD_SPEC = {
+  EXTRACT_MEMORY:           { label: "每轮自动提取长期记忆", type: "bool",
+                              hint: "对话结束后自动看看这轮有没有值得长期记住的东西。" +
+                                    "代价是每轮多一次 LLM 调用" },
   LLM_MODEL:                { label: "模型", type: "text",
                               hint: "例如 deepseek-chat / deepseek-reasoner" },
   MAX_STEPS:                { label: "最大循环步数", type: "number",
@@ -760,23 +770,32 @@ function addPermission(data) {
 }
 
 function addMemory(data) {
+  const who = data.phase === "extract" ? "记忆提取" : "记忆整理";
+
   if (data.status === "running") {
-    log.append(el("div", "meta", `记忆整理中…（${data.reason}）`));
-  } else if (data.status === "done") {
-    const line = data.changed.length
-      ? `记忆已整理 · ${data.sessions_used} 个会话 · 改动 ${data.changed.length} 条：${data.changed.join(", ")}`
-      : `记忆已整理 · ${data.sessions_used} 个会话 · 没有值得长期保存的新信息`;
-    log.append(el("div", "meta", line));
-    if (data.summary) {
-      const box = el("div", "note");
-      box.style.borderLeftColor = "var(--accent)";
-      box.style.background = "var(--grad-bubble)";
-      box.append(el("div", null, "AutoDream：" + data.summary));
-      log.append(box);
-    }
-  } else {
-    log.append(el("div", "meta", "记忆整理失败：" + (data.message || "")));
+    log.append(el("div", "meta", `${who}中…（${data.reason}）`));
+    scrollDown();
+    return;
   }
+  if (data.status !== "done") {
+    log.append(el("div", "meta", `${who}失败：${data.message || ""}`));
+    scrollDown();
+    return;
+  }
+
+  // 提取跑完但什么都没记，是最常见的情况 —— 一行轻描淡写就好，
+  // 不要每次都糊一大块东西在对话末尾
+  if (!data.changed.length) {
+    log.append(el("div", "meta", `${who}：这轮没有值得长期保存的信息`));
+    scrollDown();
+    return;
+  }
+
+  const box = el("div", "note memo");
+  box.append(el("div", null, `${who} · 写入 ${data.changed.length} 条记忆`));
+  box.append(el("div", "memo-files mono", data.changed.join("  ")));
+  if (data.summary) box.append(el("div", "partial", data.summary));
+  log.append(box);
   scrollDown();
 }
 
@@ -889,11 +908,20 @@ async function refreshConfig() {
   if (!fields.dataset.built) {
     for (const [key, spec] of Object.entries(FIELD_SPEC)) {
       const box = el("div", "field");
-      box.append(el("label", null, spec.label));
       const input = el("input");
       input.id = "cfg-" + key;
-      input.type = spec.type;
-      box.append(input);
+
+      if (spec.type === "bool") {
+        // 用一个可点的行，而不是裸 checkbox —— 这一栏的点法和其他项一致
+        const row = el("label", "switch");
+        input.type = "checkbox";
+        row.append(input, el("span", null, spec.label));
+        box.append(row);
+      } else {
+        box.append(el("label", null, spec.label));
+        input.type = spec.type;
+        box.append(input);
+      }
       if (spec.hint) box.append(el("div", "hint", spec.hint));
       fields.append(box);
     }
@@ -901,7 +929,9 @@ async function refreshConfig() {
   }
   for (const [key, value] of Object.entries(cfg.editable)) {
     const input = $("cfg-" + key);
-    if (input && document.activeElement !== input) input.value = value;
+    if (!input || document.activeElement === input) continue;
+    if (FIELD_SPEC[key]?.type === "bool") input.checked = value === true;
+    else input.value = value;
   }
 
   $("rootPath").textContent = cfg.readonly.root;
@@ -916,8 +946,9 @@ async function refreshConfig() {
 $("saveSettings").onclick = async () => {
   const values = {};
   for (const key of Object.keys(FIELD_SPEC)) {
-    const raw = $("cfg-" + key).value.trim();
-    if (raw !== "") values[key] = raw;
+    const input = $("cfg-" + key);
+    if (FIELD_SPEC[key].type === "bool") values[key] = input.checked;
+    else if (input.value.trim() !== "") values[key] = input.value.trim();
   }
   const resp = await fetch("/api/config", {
     method: "POST", headers: { "Content-Type": "application/json" },

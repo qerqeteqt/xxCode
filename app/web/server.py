@@ -45,6 +45,7 @@ from app.context.compactor import ContextCompactor
 from app.events import Event
 from app.llm.client import LLMClient
 from app.memory import MemoryManager
+from app.memory.extractor import MemoryExtractor
 from app.memory.session_store import Session, SessionError, SessionStore
 from app.scheduler import Scheduler
 from app.tools import (
@@ -62,6 +63,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 # 设置面板里允许改的项。**白名单**，不是黑名单 —— 加一项要显式来这里加。
 # .env 里还有 API Key 之类的东西，绝不能让它被网页随便写
 EDITABLE_KEYS = (
+    "EXTRACT_MEMORY",
     "LLM_MODEL",
     "MAX_STEPS",
     "COMPACT_THRESHOLD_TOKENS",
@@ -359,20 +361,25 @@ def create_app(root: str | Path) -> FastAPI:
             logger.info("不整理记忆：%s", decision.reason)
             return
 
-        queue.put_nowait(Event("memory", {"status": "running", "reason": decision.reason}))
+        queue.put_nowait(
+            Event("memory", {"phase": "consolidate", "status": "running", "reason": decision.reason})
+        )
         try:
             # 用会话自己的 client：AutoDream 的开销也算进这次的账单里，
             # 不然它的花费会凭空消失
             result = await scheduler.consolidate(live.llm, force=False)
         except Exception as e:  # noqa: BLE001 —— 整理是「顺带做的事」
             logger.exception("记忆整理出错")
-            queue.put_nowait(Event("memory", {"status": "failed", "message": str(e)}))
+            queue.put_nowait(
+                Event("memory", {"phase": "consolidate", "status": "failed", "message": str(e)})
+            )
             return
 
         queue.put_nowait(
             Event(
                 "memory",
                 {
+                    "phase": "consolidate",
                     "status": "done",
                     "summary": result.summary,
                     "changed": result.changed,
@@ -406,8 +413,9 @@ def create_app(root: str | Path) -> FastAPI:
                         },
                     )
                 )
-                # 整理放在最后：**先让用户拿到答案**。它可能跑几十秒，
-                # 挡在答案前面没人受得了
+                # 提取和整理都放在 done 之后：**先让用户拿到答案**。
+                # 两个加起来可能几十秒，挡在答案前面没人受得了
+                await _extract_memory(queue, live)
                 await _consolidate_if_due(queue, live)
             except MaxIterationError as e:
                 queue.put_nowait(
@@ -468,6 +476,7 @@ def create_app(root: str | Path) -> FastAPI:
         env_path = PROJECT_ROOT / ".env"
         return {
             "editable": {
+                "EXTRACT_MEMORY": settings.extract_memory,
                 "LLM_MODEL": settings.llm_model,
                 "MAX_STEPS": settings.max_steps,
                 "COMPACT_THRESHOLD_TOKENS": settings.compact_threshold_tokens,

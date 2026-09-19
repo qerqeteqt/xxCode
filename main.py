@@ -23,10 +23,11 @@ from pathlib import Path
 
 from app.agent.main_agent import MainAgent
 from app.agent.react_loop import MaxIterationError
+from app.memory.extractor import MemoryExtractor
 from app.context.compactor import ContextCompactor
 from app.llm.client import DeltaHook, LLMClient, human_tokens
 from app.memory import MemoryManager
-from app.memory.session_store import SessionError, SessionStore
+from app.memory.session_store import Session, SessionError, SessionStore
 from app.scheduler import Scheduler
 from app.tools import (
     Decision,
@@ -34,7 +35,7 @@ from app.tools import (
     PermissionRequest,
     build_default_registry,
 )
-from config.settings import get_settings
+from config.settings import Settings, get_settings
 
 logger = logging.getLogger("xxcode")
 
@@ -87,7 +88,7 @@ async def _run_session(
     resume: bool,
     assume_yes: bool = False,
     on_delta: DeltaHook | None = None,
-) -> str:
+) -> tuple[str, Session]:
     settings = get_settings()
     store = SessionStore(root)
 
@@ -178,7 +179,31 @@ async def _run_session(
         _record_usage()
         logger.info("本次会话用量: %s", llm.usage)
         session.finish("finished")
-        return answer
+
+        # 记忆提取要**在答案打印之后**跑（见 main），所以这里把 llm 和会话
+        # 一起交出去 —— 提取要用同一个 client，开销才算得进这次的账单
+        return answer, session
+
+
+async def _run_extract(root: Path, session: Session, settings: Settings) -> None:
+    """每轮对话后提取长期记忆。"""
+    if not settings.extract_memory:
+        return
+
+    async with LLMClient(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        timeout=settings.llm_timeout,
+    ) as llm:
+        result = await MemoryExtractor(root, llm).run(session.load_messages())
+
+    if result is None or not result.completed:
+        return
+    if result.changed:
+        print(f"[记忆提取] 写入: {', '.join(result.changed)}")
+    else:
+        logger.info("记忆提取：这轮没有值得长期保存的信息")
 
 
 async def _run_consolidation(root: Path, *, force: bool) -> None:
@@ -268,6 +293,12 @@ def main() -> None:
         help="强制整理一次长期记忆后退出（跳过触发条件判断）",
     )
     parser.add_argument(
+        "--no-memory",
+        dest="no_memory",
+        action="store_true",
+        help="这次不跑每轮的记忆提取",
+    )
+    parser.add_argument(
         "--no-consolidate",
         dest="no_consolidate",
         action="store_true",
@@ -329,7 +360,7 @@ def main() -> None:
     question = args.question or "用一句话解释 ReAct 是什么"
 
     try:
-        answer = asyncio.run(
+        answer, session = asyncio.run(
             _run_session(
                 question,
                 root,
@@ -359,6 +390,13 @@ def main() -> None:
     else:
         # 流式的话内容已经一个字一个字显示过了，这里只补一个收尾换行
         print()
+
+    # 提取记忆放在打印之后 —— 它要多花一次 LLM 调用，不该挡在答案前面
+    if not args.no_memory:
+        try:
+            asyncio.run(_run_extract(root, session, get_settings()))
+        except Exception as e:  # noqa: BLE001 —— 顺带做的事，失败不影响本次会话
+            logger.warning("记忆提取出错（不影响本次会话）: %s", e)
 
     if not args.no_consolidate:
         try:

@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     consolidate_min_hours: float = 24.0
     consolidate_min_sessions: int = 5
 
+    # 每轮对话后自动提取长期记忆。默认开 —— 关了的话「记住 X」就只能等
+    # AutoDream 哪天攒够条件去翻会话流水。代价是每轮多一次 LLM 调用
+    extract_memory: bool = True
+
     # 上下文压缩的触发阈值（上一次调用真实的 prompt token 数）。
     # deepseek-chat 的上限是 64k，40k 留出余量给回复和后续增长。
     compact_threshold_tokens: int = 40_000

@@ -33,8 +33,11 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_timeout: float = 60.0
 
-    # ReAct Loop 的最大循环次数，超过就抛 MaxIterationError
-    max_steps: int = 10
+    # ReAct Loop 的最大循环次数，超过就抛 MaxIterationError。
+    # 20 而不是 10：探索类任务里「读文件 → 定位 → 验证」天然要好几步，
+    # 10 步经常卡在「刚调查完还没来得及动手」。有 token 统计和上下文压缩兜底，
+    # 跑飞的成本是可控的
+    max_steps: int = 20
 
     # 记忆整理（AutoDream）的触发条件。两个是**并且**关系 —— 都满足才跑。
     # 刻意保守：整理要花真金白银，宁可少跑几次。想立刻跑一次用 --consolidate。

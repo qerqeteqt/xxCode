@@ -107,18 +107,6 @@ def _compose_task(task: str, context: str | None) -> str:
     return f"{task}\n\n--- 已知信息（来自调用方，可直接采信） ---\n{context}"
 
 
-def _last_progress(messages: list[dict]) -> str:
-    """从已污染的历史里捞出最后一段有内容的 assistant 发言。
-
-    run_react_loop 是就地修改 messages 的，所以即使它抛了 MaxIterationError，
-    已经查到的东西也还在 —— 白扔掉等于让调用方白付一次 token。
-    """
-    for message in reversed(messages):
-        if message.get("role") == "assistant" and message.get("content"):
-            return str(message["content"])
-    return ""
-
-
 class _SubAgentParams(BaseModel):
     agent_type: AgentType = Field(
         description=(
@@ -209,13 +197,13 @@ class SubAgentTool(SandboxedTool):
             )
         except MaxIterationError as e:
             # 子 Agent 的"没跑完"不是 Runtime 的失败，而是一种正常结果 ——
-            # 转成文本回给 Main，让它自己决定要不要换个方式再来
-            partial = _last_progress(messages)
+            # 转成文本回给 Main，让它自己决定要不要换个方式再来。
+            # 进展由循环自己带在异常里（e.partial），不用在这里再捞一遍
             logger.warning("[subagent] %s 未完成: %s", agent_type, e)
-            if partial:
+            if e.partial:
                 return ToolResult(
                     f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限]\n"
-                    f"以下是它中断前的最后输出：\n{partial}"
+                    f"以下是它中断前的最后输出：\n{e.partial}"
                 )
             return ToolResult(
                 f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限] 没有任何中间结论。"

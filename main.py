@@ -149,8 +149,12 @@ async def _run_session(
             _record_usage()
             session.finish("failed")
             raise MaxIterationError(
-                f"{e}。本次过程已保存在会话 {session.session_id}，"
-                f'用 python main.py --continue "接着上次" 可以继续'
+                e.max_steps,
+                note=(
+                    f"。本次过程已保存在会话 {session.session_id}，"
+                    f'用 python main.py --continue "接着上次" 可以继续'
+                ),
+                partial=e.partial,
             ) from None
         except BaseException:
             # 包括 Ctrl+C 和 LLM 报错。会话文件里要留下「这次没跑完」的痕迹，
@@ -285,6 +289,10 @@ def main() -> None:
     except MaxIterationError as e:
         # 同理：跑不完是个正常结果，不是程序崩了
         print(f"\n未能完成：{e}", file=sys.stderr)
+        if e.partial:
+            # 跑到上限通常不是一无所获，而是「查了一大堆没来得及收尾」。
+            # 把它说出来，用户才知道它卡在哪
+            print(f"\n它中断前的最后进展：\n{e.partial}", file=sys.stderr)
         raise SystemExit(1) from None
 
     # 先把答案给你看，再跑整理 —— 整理可能几十秒，不该挡在答案前面

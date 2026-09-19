@@ -40,12 +40,30 @@ ExecuteTool = Callable[[dict], Awaitable[str]]
 MessageHook = Callable[[dict], None]
 
 
+def last_progress(messages: list[dict]) -> str:
+    """从历史里捞出模型最后一段有内容的发言。
+
+    跑到步数上限时用得上：那通常**不是**一无所获，而是「查了一大堆但没来得及收尾」。
+    直接丢掉等于让调用方白付一次 token。run_react_loop 又是就地改 messages 的，
+    所以这些内容本来就在手边。
+    """
+    for message in reversed(messages):
+        if message.get("role") == "assistant" and message.get("content"):
+            return str(message["content"]).strip()
+    return ""
+
+
 class MaxIterationError(RuntimeError):
     """循环次数用完仍未得出最终答案。"""
 
-    def __init__(self, max_steps: int) -> None:
-        super().__init__(f"达到最大循环次数 {max_steps}，仍未得出最终答案")
+    def __init__(self, max_steps: int, note: str = "", partial: str = "") -> None:
+        # note 是给调用方补充说明用的（比如「过程已保存，可以 --continue」）。
+        # 它是**参数**而不是让调用方再包一层 —— 直接构造一个新的
+        # MaxIterationError("一大段文字") 会把那段文字塞进 max_steps 的位置，
+        # 消息就被套成「达到最大循环次数 达到最大循环次数 10，…」
+        super().__init__(f"达到最大循环次数 {max_steps}，仍未得出最终答案{note}")
         self.max_steps = max_steps
+        self.partial = partial
 
 
 async def run_react_loop(
@@ -107,6 +125,12 @@ async def run_react_loop(
             ),
         )
 
+        # 模型每步说的话，就是它的判断和计划。**不打出来用户只能看到一串工具调用**，
+        # 完全不知道它在想什么 —— 跑偏了看不出来，也没法判断该不该叫停。
+        # 这是「20 步跑完却看不懂发生了什么」的直接原因。
+        if msg.get("content"):
+            logger.info("[模型] %s", str(msg["content"]).strip())
+
         # assistant 这条必须原样回灌，否则下一步的 tool 消息没有归属的 tool_call_id，
         # API 会直接报 400。
         record(msg)
@@ -129,4 +153,6 @@ async def run_react_loop(
                 }
             )
 
-    raise MaxIterationError(max_steps)
+    # 撞上限时把最后的进展带上 —— 那通常不是一无所获，
+    # 而是「查了一大堆但没来得及收尾」
+    raise MaxIterationError(max_steps, partial=last_progress(messages))

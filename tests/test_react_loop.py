@@ -166,6 +166,55 @@ def test_raises_max_iteration_error():
     assert len(llm.calls) == 3
 
 
+def test_撞上限时把最后的进展带出来():
+    """跑到上限通常不是一无所获，而是「查了一大堆没来得及收尾」。
+    白扔掉等于让调用方白付一次 token。"""
+    llm = FakeLLM(
+        [
+            _assistant("我先看看这个文件怎么被用的", tool_calls=[_tool_call("Read")]),
+            _assistant(tool_calls=[_tool_call("Read")]),
+        ]
+    )
+
+    with pytest.raises(MaxIterationError) as exc_info:
+        _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=2))
+
+    assert exc_info.value.partial == "我先看看这个文件怎么被用的"
+
+
+def test_没有中间发言时_partial_为空():
+    llm = FakeLLM([_assistant(tool_calls=[_tool_call("Read")])])
+
+    with pytest.raises(MaxIterationError) as exc_info:
+        _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=1))
+
+    assert exc_info.value.partial == ""
+
+
+def test_last_progress_取最后一条有内容的发言():
+    from app.agent.react_loop import last_progress
+
+    history = [
+        {"role": "assistant", "content": "早先说的"},
+        {"role": "tool", "content": "工具结果不算"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c"}]},
+        {"role": "assistant", "content": " 最后说的 "},
+        {"role": "tool", "content": "结果",
+         "tool_call_id": "c"},
+    ]
+
+    assert last_progress(history) == "最后说的"
+
+
+def test_max_iteration_消息不会被套两层():
+    """构造时传字符串会被塞进 max_steps 的位置，消息就变成
+    「达到最大循环次数 达到最大循环次数 10，…」—— 这个 bug 真出现过。"""
+    error = MaxIterationError(10, note="。可以 --continue")
+
+    assert str(error) == "达到最大循环次数 10，仍未得出最终答案。可以 --continue"
+    assert str(error).count("达到最大循环次数") == 1
+
+
 def test_on_message_每条新增消息都回调一次():
     """Session 靠这个钩子做 append-only 落盘 —— 回调的内容必须和 messages
     实际追加的部分完全一致，否则恢复出来的历史会和真实 Context 对不上。"""

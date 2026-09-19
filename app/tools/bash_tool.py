@@ -17,6 +17,7 @@ import os
 import re
 import signal
 import sys
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,33 @@ def check_dangerous(command: str) -> str | None:
 # ---------------------------------------------------------------- 工具
 
 
+def find_bash() -> str | None:
+    """找一个能用的 bash（Windows 上才需要）。
+
+    为什么非找不可：Windows 上 `create_subprocess_shell` 默认走 **cmd.exe**，
+    而模型（以及几乎所有 agent 的训练数据）写的是 Unix 命令 —— `grep`、`tail`、
+    `head`、`cat` 在 cmd 里全都不存在。实测一条 `grep ... | head -30` 直接
+    退出码 255，白烧一步，然后模型还得再花一步去绕。
+
+    刻意**不**优先用 `shutil.which("bash")`：它可能返回
+    `C:\\Windows\\System32\\bash.exe` —— 那是 WSL 的入口，跑在另一套文件系统
+    视图里，拿它当 shell 只会错的更离谱。所以先认 Git 的安装路径。
+    """
+    if sys.platform != "win32":
+        return None  # POSIX 上 /bin/sh 就是对的
+
+    for candidate in (
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+_BASH = find_bash()
+
+
 async def _kill_tree(process: asyncio.subprocess.Process) -> None:
     """终止命令进程**及其所有子进程**，然后把管道收干净。
 
@@ -148,7 +176,8 @@ class BashTool(SandboxedTool):
     name = "Bash"
     risk = "execute"
     description = (
-        "在项目根目录下执行 shell 命令，返回 exit code、stdout 和 stderr。"
+        "在项目根目录下执行 shell 命令（Windows 上用 Git Bash），"
+        "返回 exit code、stdout 和 stderr。"
         "适合运行测试、构建、git 等操作。不要用它做能用 Read/Glob/Grep 完成的事。"
     )
     params_model = BashParams
@@ -159,6 +188,43 @@ class BashTool(SandboxedTool):
         # 不是「挡住」—— 挡 Bash 得靠操作系统级隔离，不是规则
         return params.command
 
+    @staticmethod
+    def _env() -> dict[str, str]:
+        """子进程的环境变量。
+
+        把 Agent 自己那个 Python 的目录放到 PATH 最前面。否则 Bash 里的 `python`
+        取决于**调用者当时有没有激活 conda 环境**：从终端跑（激活过）能找到 pytest，
+        从 PyCharm 跑（没激活）就 `No module named pytest`。同一句命令时好时坏，
+        这种不确定性比报错本身更难查。
+        """
+        env = dict(os.environ)
+        env["PATH"] = (
+            str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        )
+        return env
+
+    async def _spawn(self, command: str) -> asyncio.subprocess.Process:
+        """起一个进程跑命令。
+
+        有 bash 就用 `bash -c`，没有才退回默认的 `create_subprocess_shell`
+        （Windows 上是 cmd.exe）。
+        """
+        common = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "cwd": self.sandbox.root,
+            "env": self._env(),
+        }
+        if _BASH is not None:
+            return await asyncio.create_subprocess_exec(_BASH, "-c", command, **common)
+
+        return await asyncio.create_subprocess_shell(
+            command,
+            # POSIX 上单开一个进程组，才能用 killpg 一次干掉整棵树
+            start_new_session=sys.platform != "win32",
+            **common,
+        )
+
     async def execute(self, command: str, timeout: float) -> ToolResult:
         reason = check_dangerous(command)
         if reason:
@@ -167,14 +233,7 @@ class BashTool(SandboxedTool):
                 f"如果确实是必要操作，请让用户手动执行。"
             )
 
-        process = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.sandbox.root,
-            # POSIX 上单开一个进程组，才能用 killpg 一次干掉整棵树
-            start_new_session=sys.platform != "win32",
-        )
+        process = await self._spawn(command)
 
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -187,8 +246,8 @@ class BashTool(SandboxedTool):
                 f"如果是长时间任务，请拆小或提高 timeout 参数。"
             ) from None
 
-        stdout = decode_bytes(stdout_b)
-        stderr = decode_bytes(stderr_b)
+        stdout = decode_bytes(stdout_b, prefer_utf8=False)
+        stderr = decode_bytes(stderr_b, prefer_utf8=False)
 
         parts = [f"exit code: {process.returncode}"]
         if stdout.strip():

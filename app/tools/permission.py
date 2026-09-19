@@ -63,6 +63,43 @@ SENSITIVE_PATTERNS: tuple[str, ...] = (
 
 PERMISSIONS_FILE = ".agent/permissions.json"
 
+# 明确只读的 shell 命令前缀，命中就放行、不问。
+#
+# 为什么需要它：7c 第一次真实使用时，一条 `grep` 也弹了一次确认，用户连着按了
+# 6 次 y —— **那正是我在设计文档里写下的「用户闭着眼睛按 y，比不问更危险」**。
+# 把「读」和「改」一视同仁地当成高危，结果是训练用户不要看提示。
+#
+# 刻意不收 `python`、`python -c`、`sh`、`eval` —— 它们能执行任意代码，
+# 不管看起来多无辜。收 `python -m pytest` 是因为它是这个项目里最主要的验证手段，
+# 而且跑的是用户自己的测试套件。
+READ_ONLY_COMMANDS: tuple[str, ...] = (
+    "ls", "cat", "head", "tail", "wc", "find", "grep", "rg", "fd", "tree",
+    "pwd", "which", "where", "file", "stat", "du", "df", "sort", "uniq",
+    "cut", "diff", "echo",
+    "git status", "git log", "git diff", "git show", "git blame",
+    "git rev-parse", "git ls-files", "git describe",
+    "python -m pytest", "pytest",
+)
+
+# 这些字符一出现就不当只读 —— `>` 能写文件，反引号/`$()` 能执行命令
+_WRITE_INDICATORS = (">", "`", "$(")
+
+
+def is_read_only_command(command: str) -> bool:
+    """这条 shell 命令看起来是只读的吗。
+
+    是个**速度缓冲**，不是安全边界：`find . -exec rm {} \\;` 也以 find 开头。
+    它要解决的是「噪声太多导致用户不看提示」，不是「挡住恶意命令」——
+    后者得靠操作系统级隔离。
+    """
+    stripped = command.strip()
+    if any(token in stripped for token in _WRITE_INDICATORS):
+        return False
+    return any(
+        stripped == prefix or stripped.startswith(prefix + " ")
+        for prefix in READ_ONLY_COMMANDS
+    )
+
 _RISK_VERB = {"read": "读取", "write": "写入", "execute": "执行"}
 
 
@@ -102,6 +139,24 @@ def matches_any(subject: str, patterns: tuple[str, ...] | list[str]) -> bool:
     return any(
         fnmatch.fnmatch(subject, pattern) or fnmatch.fnmatch(name, pattern)
         for pattern in patterns
+    )
+
+
+def mentions_any(command: str, patterns: tuple[str, ...] | list[str]) -> bool:
+    """命令字符串里**提到的词**有没有命中规则。
+
+    为什么需要它：Bash 的 subject 是一整条命令，路径规则套不上去 ——
+    `cat .env` 整体既不是 `.env` 也不是 `subdir/.env`。但拆成词之后，
+    `.env` 就露出来了。
+
+    这条是补上「只读命令白名单」刚引入的洞：`cat` 在白名单里，
+    没有它 `cat .env` 会被当成只读命令直接放行 —— 白名单反而开了个口子。
+
+    只对**没有空格**的词做匹配，避免把正则式参数（比如 `grep "a b"` 里的东西）
+    拆得七零八落。
+    """
+    return any(
+        matches_any(token, patterns) for token in command.split() if token
     )
 
 
@@ -180,10 +235,16 @@ class PermissionGate:
     async def check(self, tool: Tool, subject: str | None) -> PermissionOutcome:
         risk = getattr(tool, "risk", "execute")
 
-        if subject and matches_any(subject, self._allow):
+        if subject and (
+            matches_any(subject, self._allow) or mentions_any(subject, self._allow)
+        ):
             return PermissionOutcome(True)
 
-        if subject and matches_any(subject, self._deny):
+        # 命令字符串不像路径那样能被整条匹配，所以额外拆词看一遍：
+        # `cat .env` 的 token 里有 `.env`，这一条必须挡住
+        if subject and (
+            matches_any(subject, self._deny) or mentions_any(subject, self._deny)
+        ):
             return PermissionOutcome(
                 False,
                 f"{tool.name}: 拒绝访问 {subject!r} —— 它命中敏感路径规则。"
@@ -192,6 +253,11 @@ class PermissionGate:
             )
 
         if risk == "read":
+            return PermissionOutcome(True)
+
+        # 只读的 shell 命令不弹窗。放在 grants 之前判，是为了让「没放行过」的
+        # 会话里 grep / git log / pytest 也照常安静通过
+        if risk == "execute" and subject and is_read_only_command(subject):
             return PermissionOutcome(True)
 
         if risk in self._grants:

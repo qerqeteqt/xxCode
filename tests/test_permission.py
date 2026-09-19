@@ -185,14 +185,16 @@ def test_写操作会问人(project):
 
 
 def test_执行命令会问人(project):
+    """用白名单外的命令 —— `echo` / `ls` 这类只读命令现在不问了。"""
     confirmer = FakeConfirmer(Decision.ALLOW_ONCE)
     registry = _registry(project, confirmer)
 
-    result = _run(registry.execute(_call("Bash", {"command": "echo hi"})))
+    result = _run(registry.execute(_call("Bash", {"command": "mkdir 新目录"})))
 
     assert len(confirmer.requests) == 1
     assert confirmer.requests[0].risk == "execute"
-    assert "hi" in result
+    assert "exit code: 0" in result
+    assert (project / "新目录").is_dir()
 
 
 def test_拒绝后把原因回灌给模型(project):
@@ -233,7 +235,7 @@ def test_会话放行不跨风险等级(project):
     registry = _registry(project, confirmer)
 
     _run(registry.execute(_call("Write", {"path": "a.py", "content": "1\n"})))
-    _run(registry.execute(_call("Bash", {"command": "echo hi"})))
+    _run(registry.execute(_call("Bash", {"command": "mkdir 新目录"})))
 
     assert [r.risk for r in confirmer.requests] == ["write", "execute"]
 
@@ -242,7 +244,7 @@ def test_没有人可问时拒绝(project):
     """宁可不做，也不要静默地做。"""
     registry = _registry(project, confirmer=None)
 
-    result = _run(registry.execute(_call("Bash", {"command": "echo hi"})))
+    result = _run(registry.execute(_call("Bash", {"command": "mkdir 新目录"})))
 
     assert "没有人工确认通道" in result
 
@@ -311,17 +313,59 @@ def test_匹配同时看整条路径和文件名(subject, expected):
     assert matches_any(subject, SENSITIVE_PATTERNS) is expected
 
 
-def test_Bash_命令命中不了路径规则(project):
-    """这是明知不补的洞：命令字符串不是路径，规则命中不可靠。
-    这条测试记录的**不是**「安全」，而是「这里挡不住」。"""
+def test_Bash_提到敏感文件也挡得住(project):
+    """`cat .env` 是最常见的写法，必须挡住。
+
+    整条命令当路径匹配是匹配不上的，所以规则要**拆词**再看一遍。
+    这一条是补「只读命令白名单」引入的洞：`cat` 在白名单里，
+    不额外检查的话 `cat .env` 会被当只读命令直接放行。
+    """
     confirmer = FakeConfirmer(Decision.ALLOW_ONCE)
     registry = _registry(project, confirmer)
 
-    _run(registry.execute(_call("Bash", {"command": "cat .env"})))
+    result = _run(registry.execute(_call("Bash", {"command": "cat .env"})))
 
-    # 没被规则拦，走的是「问人」这条路 —— 而这正是 7c 选择档 A 的含义
+    assert "拒绝访问" in result
+    assert confirmer.requests == []  # 规则命中 = 硬拒，不弹窗
+
+
+def test_只读命令不再弹窗(project):
+    """7c 第一次真实使用时一条 grep 也要确认，用户连按了 6 次 y ——
+    那正是「用户闭着眼睛按 y，比不问更危险」。"""
+    confirmer = FakeConfirmer(Decision.DENY)
+    registry = _registry(project, confirmer)
+
+    for command in ("ls -la", "git status", "python -m pytest -q", "grep -rn X ."):
+        _run(registry.execute(_call("Bash", {"command": command})))
+
+    assert confirmer.requests == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["mkdir 新目录", "rm -rf build", "python -c 'print(1)'", "echo x > 文件"],
+)
+def test_可能改东西的命令仍然要问(project, command):
+    confirmer = FakeConfirmer(Decision.DENY)
+    registry = _registry(project, confirmer)
+
+    _run(registry.execute(_call("Bash", {"command": command})))
+
     assert len(confirmer.requests) == 1
-    assert confirmer.requests[0].risk == "execute"
+
+
+def test_Bash_命令改写就挡不住了(project):
+    """这条测试记录的是**局限**，不是安全保证。
+
+    闸门拦的是工具调用，不是意图。命令字符串稍作改写（bash 里 `''` 是空串）
+    就绕过了拆词匹配 —— 真正的隔离得靠操作系统，见 README。
+    """
+    confirmer = FakeConfirmer(Decision.ALLOW_ONCE)
+    registry = _registry(project, confirmer)
+
+    result = _run(registry.execute(_call("Bash", {"command": "cat .e''nv"})))
+
+    assert "拒绝访问" not in result
 
 
 # ================================================================ SubAgent 子闸门

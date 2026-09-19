@@ -80,9 +80,14 @@ class _CountingLLM:
         self._inner = inner
         self.calls = 0
 
-    async def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_delta=None,
+    ) -> dict:
         self.calls += 1
-        return await self._inner.chat(messages, tools=tools)
+        return await self._inner.chat(messages, tools=tools, on_delta=on_delta)
 
 
 def _snapshot_usage(llm: object) -> TokenUsage:

@@ -54,7 +54,7 @@ class SummarizerLLM:
         self.calls: list[list[dict]] = []
         self.tools_seen: list = []
 
-    async def chat(self, messages: list[dict], tools: list | None = None) -> dict:
+    async def chat(self, messages: list[dict], tools: list | None = None, on_delta=None) -> dict:
         self.calls.append([dict(m) for m in messages])
         self.tools_seen.append(tools)
         if self._fail:
@@ -224,7 +224,7 @@ def test_循环里会在每次调用前检查压缩():
     class ReplyLLM(SummarizerLLM):
         """既当摘要器又当正式回复 —— 真环境里本来就是同一个 client。"""
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, on_delta=None):
             self.calls.append([dict(m) for m in messages])
             self.tools_seen.append(tools)
             return {"role": "assistant", "content": "完成"}

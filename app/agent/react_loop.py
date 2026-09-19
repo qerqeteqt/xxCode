@@ -26,6 +26,7 @@ from app.llm.client import LLMClient
 
 if TYPE_CHECKING:
     from app.context.compactor import ContextCompactor
+    from app.llm.client import DeltaHook
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ async def run_react_loop(
     max_steps: int = 10,
     on_message: MessageHook | None = None,
     compactor: "ContextCompactor | None" = None,
+    on_delta: "DeltaHook | None" = None,
 ) -> str:
     """驱动 ReAct 循环，返回模型的最终回答。
 
@@ -102,7 +104,13 @@ async def run_react_loop(
             # 收到「消息被删了」的通知 —— 它靠 compactor 自己的回调写 compaction 记录
             await compactor.maybe_compact(messages)
 
-        msg = await llm.chat(messages, tools=tools)
+        msg = await llm.chat(messages, tools=tools, on_delta=on_delta)
+
+        # 流式输出没有结尾换行。不补的话，紧接着的日志会粘在回答末尾
+        # （实测：「…说完。21:12:28 INFO app.agent.react_loop | step 1/20: …」）。
+        # 必须放在分支**之前** —— 放在某条分支里，另一条路就走不到了
+        if on_delta is not None and msg.get("content"):
+            on_delta("\n")
 
         tool_calls = msg.get("tool_calls")
 
@@ -128,7 +136,9 @@ async def run_react_loop(
         # 模型每步说的话，就是它的判断和计划。**不打出来用户只能看到一串工具调用**，
         # 完全不知道它在想什么 —— 跑偏了看不出来，也没法判断该不该叫停。
         # 这是「20 步跑完却看不懂发生了什么」的直接原因。
-        if msg.get("content"):
+        #
+        # 流式的时候这段话已经一个字一个字显示过了，再打一遍就是重复。
+        if msg.get("content") and on_delta is None:
             logger.info("[模型] %s", str(msg["content"]).strip())
 
         # assistant 这条必须原样回灌，否则下一步的 tool 消息没有归属的 tool_call_id，

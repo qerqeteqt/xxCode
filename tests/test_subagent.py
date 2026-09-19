@@ -44,7 +44,7 @@ class ScriptedLLM:
         self.calls: list[list[dict]] = []
         self.tools_seen: list = []
 
-    async def chat(self, messages: list[dict], tools: list | None = None) -> dict:
+    async def chat(self, messages: list[dict], tools: list | None = None, on_delta=None) -> dict:
         self.calls.append([dict(m) for m in messages])
         self.tools_seen.append(tools)
         if not self._replies:
@@ -171,7 +171,7 @@ def test_头部带上_token_开销(tmp_path):
             self.usage = TokenUsage()
             self._per_call = per_call
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, on_delta=None):
             result = await super().chat(messages, tools)
             self.usage = self.usage + self._per_call
             return result

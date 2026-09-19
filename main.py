@@ -24,7 +24,7 @@ from pathlib import Path
 from app.agent.main_agent import MainAgent
 from app.agent.react_loop import MaxIterationError
 from app.context.compactor import ContextCompactor
-from app.llm.client import LLMClient, human_tokens
+from app.llm.client import DeltaHook, LLMClient, human_tokens
 from app.memory import MemoryManager
 from app.memory.session_store import SessionError, SessionStore
 from app.scheduler import Scheduler
@@ -70,12 +70,23 @@ async def _always_allow(request: PermissionRequest) -> Decision:  # noqa: ARG001
     return Decision.ALLOW_SESSION
 
 
+def _print_delta(text: str) -> None:
+    """把模型吐出的一小段写到终端。
+
+    `end=""` + `flush=True` 是关键：不换行、立刻刷出去，否则看不到
+    「一个字一个字冒出来」的效果。结尾的换行由循环在响应结束时补 ——
+    流式输出本身不带换行，不补的话下一条日志会粘在同一行上。
+    """
+    print(text, end="", flush=True)
+
+
 async def _run_session(
     question: str,
     root: Path,
     session_ref: str | None,
     resume: bool,
     assume_yes: bool = False,
+    on_delta: DeltaHook | None = None,
 ) -> str:
     settings = get_settings()
     store = SessionStore(root)
@@ -132,6 +143,7 @@ async def _run_session(
             session=session,
             memory=memory,
             compactor=compactor,
+            on_delta=on_delta,
             max_steps=settings.max_steps,
         )
 
@@ -247,6 +259,12 @@ def main() -> None:
         help="本次会话结束后不检查记忆整理",
     )
     parser.add_argument(
+        "--no-stream",
+        dest="no_stream",
+        action="store_true",
+        help="不流式输出（默认流式：模型说的话一个字一个字冒出来）",
+    )
+    parser.add_argument(
         "--yes",
         dest="assume_yes",
         action="store_true",
@@ -260,6 +278,9 @@ def main() -> None:
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
+    # httpx 每发一次请求就打一行。对排查网络问题有点用，但对本项目是纯噪声 ——
+    # 更糟的是它会把流式的输出切得七零八落
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     root = Path(args.root).resolve()
 
@@ -279,7 +300,14 @@ def main() -> None:
 
     try:
         answer = asyncio.run(
-            _run_session(question, root, args.session, args.resume, args.assume_yes)
+            _run_session(
+                question,
+                root,
+                args.session,
+                args.resume,
+                args.assume_yes,
+                on_delta=None if args.no_stream else _print_delta,
+            )
         )
     except SessionError as e:
         # 会话相关的失败（找不到、前缀不唯一、root 对不上）是用户能自己修的问题，
@@ -296,7 +324,11 @@ def main() -> None:
         raise SystemExit(1) from None
 
     # 先把答案给你看，再跑整理 —— 整理可能几十秒，不该挡在答案前面
-    print(f"\n{answer}")
+    if args.no_stream:
+        print(f"\n{answer}")
+    else:
+        # 流式的话内容已经一个字一个字显示过了，这里只补一个收尾换行
+        print()
 
     if not args.no_consolidate:
         try:

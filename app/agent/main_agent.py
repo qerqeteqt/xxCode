@@ -18,6 +18,7 @@ from app.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from app.context.compactor import ContextCompactor
+    from app.llm.client import DeltaHook
 
 DEFAULT_SYSTEM_PROMPT = """你是一个 Code Agent，可以读写代码文件、执行命令、搜索代码库。
 
@@ -82,6 +83,7 @@ class MainAgent:
         session: Session | None = None,
         memory: MemoryManager | None = None,
         compactor: "ContextCompactor | None" = None,
+        on_delta: "DeltaHook | None" = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_steps: int = 10,
     ) -> None:
@@ -90,6 +92,7 @@ class MainAgent:
         self._max_steps = max_steps
         self._session = session
         self._compactor = compactor
+        self._on_delta = on_delta
 
         # registry 是可选依赖：不传就是 Phase 1 那种「没有工具」的状态。
         # 两种能力（schema 给模型看、execute 真执行）都从同一个对象取，
@@ -144,4 +147,5 @@ class MainAgent:
             max_steps=self._max_steps,
             on_message=self._message_hook,
             compactor=self._compactor,
+            on_delta=self._on_delta,
         )

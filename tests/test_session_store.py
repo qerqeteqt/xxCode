@@ -40,7 +40,7 @@ class ScriptedLLM:
         self._replies = list(replies)
         self.calls: list[list[dict]] = []
 
-    async def chat(self, messages: list[dict], tools: list | None = None) -> dict:
+    async def chat(self, messages: list[dict], tools: list | None = None, on_delta=None) -> dict:
         self.calls.append([dict(m) for m in messages])
         if not self._replies:
             raise AssertionError("回复脚本用完了 —— 循环比预期多跑了一轮")

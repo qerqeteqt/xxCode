@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -279,3 +280,172 @@ def test_空用量为假():
     """SubAgent 的头部靠这个判断该不该显示 tokens。"""
     assert not TokenUsage()
     assert TokenUsage(1, 0, 1)
+
+
+# ================================================================ 流式
+
+def _sse(*chunks: dict) -> httpx.Response:
+    body = "".join(
+        f"data: {json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks
+    ) + "data: [DONE]\n\n"
+    return httpx.Response(
+        200, content=body.encode("utf-8"),
+        headers={"content-type": "text/event-stream"},
+    )
+
+
+def _delta(content=None, tool_calls=None, usage=None) -> dict:
+    chunk: dict = {"choices": [{"index": 0, "delta": {}}]}
+    if content is not None:
+        chunk["choices"][0]["delta"]["content"] = content
+    if tool_calls is not None:
+        chunk["choices"][0]["delta"]["tool_calls"] = tool_calls
+    if usage is not None:
+        chunk["usage"] = usage
+    return chunk
+
+
+def test_流式把文字一段段交给回调():
+    handler = _Sequence(_sse(
+        _delta(content="ReAct "), _delta(content="是"), _delta(content="一种范式"),
+    ))
+    got: list[str] = []
+
+    result = _run(_client(handler).chat(
+        [{"role": "user", "content": "问"}], on_delta=got.append
+    ))
+
+    assert got == ["ReAct ", "是", "一种范式"]   # 回调拿到的是碎片
+    assert result["content"] == "ReAct 是一种范式"  # 返回的是拼好的完整消息
+
+
+def test_流式请求要带上_stream_参数():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return _sse(_delta(content="好"))
+
+    _run(_client(handler).chat([{"role": "user", "content": "问"}], on_delta=lambda _: None))
+
+    assert seen["stream"] is True
+    # usage 默认不在流式响应里，得显式要，否则 token 统计全变 0
+    assert seen["stream_options"] == {"include_usage": True}
+
+
+def test_流式的_tool_call_碎片要按_index_拼起来():
+    """**流式最容易写错的地方。** id 和 name 只在第一片出现，arguments 一片片来。
+    拼错的表现是「工具名变成空字符串」或「arguments 少了前半截」，
+    而两者都不会立刻报错，只会让工具调用莫名其妙地失败。"""
+    handler = _Sequence(_sse(
+        _delta(tool_calls=[{"index": 0, "id": "call_1", "function": {"name": "Read", "arguments": ""}}]),
+        _delta(tool_calls=[{"index": 0, "function": {"arguments": '{"pa'}}]),
+        _delta(tool_calls=[{"index": 0, "function": {"arguments": 'th": '}}]),
+        _delta(tool_calls=[{"index": 0, "function": {"arguments": '"a.py"}'}}]),
+    ))
+
+    result = _run(_client(handler).chat(
+        [{"role": "user", "content": "问"}], on_delta=lambda _: None
+    ))
+
+    calls = result["tool_calls"]
+    assert len(calls) == 1
+    assert calls[0]["id"] == "call_1"
+    assert calls[0]["function"]["name"] == "Read"
+    assert calls[0]["function"]["arguments"] == '{"path": "a.py"}'
+
+
+def test_流式一轮里的多个_tool_call_按_index_分开():
+    handler = _Sequence(_sse(
+        _delta(tool_calls=[
+            {"index": 0, "id": "c0", "function": {"name": "Read", "arguments": '{"a"'}},
+            {"index": 1, "id": "c1", "function": {"name": "Grep", "arguments": '{"b"'}},
+        ]),
+        _delta(tool_calls=[
+            {"index": 0, "function": {"arguments": ": 1}"}},
+            {"index": 1, "function": {"arguments": ": 2}"}},
+        ]),
+    ))
+
+    result = _run(_client(handler).chat(
+        [{"role": "user", "content": "问"}], on_delta=lambda _: None
+    ))
+
+    assert [c["function"]["name"] for c in result["tool_calls"]] == ["Read", "Grep"]
+    assert result["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'
+    assert result["tool_calls"][1]["function"]["arguments"] == '{"b": 2}'
+
+
+def test_流式文字和工具调用可以同时出现():
+    """模型常常先说一句再调工具 —— 两种情况要在同一个响应里都处理好。"""
+    handler = _Sequence(_sse(
+        _delta(content="我先看看"),
+        _delta(tool_calls=[{"index": 0, "id": "c", "function": {"name": "Read", "arguments": "{}"}}]),
+    ))
+
+    result = _run(_client(handler).chat(
+        [{"role": "user", "content": "问"}], on_delta=lambda _: None
+    ))
+
+    assert result["content"] == "我先看看"
+    assert result["tool_calls"][0]["function"]["name"] == "Read"
+
+
+def test_流式的_usage_从最后一个分片取():
+    handler = _Sequence(_sse(
+        _delta(content="答"),
+        _delta(usage={"prompt_tokens": 120, "completion_tokens": 30}),
+    ))
+    client = _client(handler)
+
+    _run(client.chat([{"role": "user", "content": "问"}], on_delta=lambda _: None))
+
+    assert client.usage.prompt_tokens == 120
+    assert client.usage.completion_tokens == 30
+    assert client.last_prompt_tokens == 120
+
+
+def test_流式也会重试可重试的状态码():
+    """429/5xx 发生在响应头阶段 —— 那时用户还没看到任何内容，重试是安全的。"""
+    handler = _Sequence(httpx.Response(429, text="慢点"), _sse(_delta(content="好了")))
+    got: list[str] = []
+
+    result = _run(_client(handler).chat(
+        [{"role": "user", "content": "问"}], on_delta=got.append
+    ))
+
+    assert result["content"] == "好了"
+    assert handler.calls == 2
+    assert got == ["好了"]  # 失败那次没吐出任何东西
+
+
+def test_流式读到一半断了不重试():
+    """用户已经看到一部分内容了，重来一遍只会看到重复的一坨。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("连接断了", request=request)
+
+    with pytest.raises(LLMError, match="流式响应中断|重试"):
+        _run(_client(handler).chat(
+            [{"role": "user", "content": "问"}], on_delta=lambda _: None
+        ))
+
+
+def test_流式忽略空行和非_data_行():
+    body = (
+        ": 这是注释\n\n"
+        "event: message\n"
+        'data: {"choices":[{"delta":{"content":"A"}}]}\n\n'
+        "\n"
+        'data: {"choices":[{"delta":{"content":"B"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    handler = _Sequence(httpx.Response(
+        200, content=body.encode(), headers={"content-type": "text/event-stream"}
+    ))
+
+    result = _run(_client(handler).chat(
+        [{"role": "user", "content": "问"}], on_delta=lambda _: None
+    ))
+
+    assert result["content"] == "AB"

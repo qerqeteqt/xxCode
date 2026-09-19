@@ -43,7 +43,7 @@ class FakeLLM:
         self.calls: list[list[dict]] = []
         self.tools_seen: list = []
 
-    async def chat(self, messages: list[dict], tools: list | None = None) -> dict:
+    async def chat(self, messages: list[dict], tools: list | None = None, on_delta=None) -> dict:
         # 存快照，否则后续原地追加会污染已记录的调用现场
         self.calls.append([dict(m) for m in messages])
         self.tools_seen.append(tools)

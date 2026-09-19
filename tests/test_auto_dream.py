@@ -43,7 +43,7 @@ class ScriptedLLM:
         self.calls: list[list[dict]] = []
         self.tools_seen: list = []
 
-    async def chat(self, messages: list[dict], tools: list | None = None) -> dict:
+    async def chat(self, messages: list[dict], tools: list | None = None, on_delta=None) -> dict:
         self.calls.append([dict(m) for m in messages])
         self.tools_seen.append(tools)
         if not self._replies:

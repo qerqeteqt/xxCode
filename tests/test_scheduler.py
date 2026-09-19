@@ -47,7 +47,7 @@ class FakeLLM:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, on_delta=None):
         self.calls += 1
         return {"role": "assistant", "content": "什么都没记"}
 

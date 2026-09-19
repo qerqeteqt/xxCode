@@ -19,14 +19,29 @@ Agent Runtime 不需要知道底下是 DeepSeek、OpenAI 还是别的什么 —�
 """
 
 import asyncio
+import json
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+# 每收到一小段模型输出就回调一次。给它文字，怎么显示是调用方的事
+DeltaHook = Callable[[str], None]
+
+
+class _Retryable(Exception):
+    """「等一会儿再来就好」的失败。只有它和网络异常会触发重试。"""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 # 这些状态码表示「等一会儿再来就好」。不在这个集合里的 4xx 说明请求本身有问题。
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -116,6 +131,34 @@ def _normalize_message(msg: dict) -> dict:
     return out
 
 
+def _merge_tool_call(accumulator: dict[int, dict], fragment: dict) -> None:
+    """把流式到达的 tool_call 碎片按 index 拼起来。
+
+    **这是流式最容易写错的地方。** 非流式时 arguments 是一个完整字符串；
+    流式时它一片一片地来，而 id 和 name 只在第一片里出现：
+
+        {"index":0,"id":"call_1","function":{"name":"Read","arguments":""}}
+        {"index":0,"function":{"arguments":"{\\"pa"}}
+        {"index":0,"function":{"arguments":"th\\":\\"a.py\\"}"}}
+
+    拼错的表现是「工具名变成了空字符串」或者「arguments 少了前半截」——
+    而两者都不会立刻报错，只会让工具调用莫名其妙地失败。
+    """
+    index = int(fragment.get("index", 0))
+    slot = accumulator.setdefault(
+        index,
+        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+    )
+    if fragment.get("id"):
+        slot["id"] = fragment["id"]
+
+    function = fragment.get("function") or {}
+    if function.get("name"):
+        slot["function"]["name"] += function["name"]
+    if function.get("arguments"):
+        slot["function"]["arguments"] += function["arguments"]
+
+
 def _usage_of(data: dict) -> TokenUsage:
     usage = data.get("usage") or {}
     return TokenUsage(
@@ -168,30 +211,30 @@ class LLMClient:
         delay = self.base_delay * (2**attempt)
         return delay + random.uniform(0, delay * 0.3)
 
-    async def _post_with_retry(self, payload: dict) -> httpx.Response:
-        for attempt in range(self.max_retries + 1):
-            error: Exception
-            delay = self._delay_for(attempt)
+    async def _attempt(self, operation: Callable[[], Awaitable[T]]) -> T:
+        """跑一次 operation，对「等一会儿再来就好」的失败自动重试。
 
+        重试的粒度是**「发请求 + 判状态码」这一整段**，而不是整个调用。
+        这个边界对流式很关键：响应头到达之前的失败（429 / 5xx / 连不上）重试是安全的，
+        **但 body 一旦开始往用户那边吐，就不能重试了** —— 用户已经看到内容，
+        重来一遍只会看到重复的一坨。所以流式解析放在 operation **之外**。
+        """
+        error: Exception = LLMError("未执行任何尝试")
+        delay = self.base_delay
+
+        for attempt in range(self.max_retries + 1):
+            delay = self._delay_for(attempt)
             try:
-                response = await self._client.post("/chat/completions", json=payload)
+                return await operation()
+            except _Retryable as e:
+                error = e
+                if e.retry_after is not None:
+                    delay = e.retry_after
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 error = e
-            else:
-                if response.status_code not in RETRYABLE_STATUS:
-                    # 成功，或者「重试也没用」。两种情况都原样交给上层判断
-                    return response
-                error = LLMError(
-                    f"HTTP {response.status_code}: {response.text[:200]}"
-                )
-                retry_after = _parse_retry_after(response.headers.get("retry-after"))
-                if retry_after is not None:
-                    delay = retry_after
 
             if attempt >= self.max_retries:
-                raise LLMError(
-                    f"重试 {self.max_retries} 次后仍然失败：{error}"
-                ) from error
+                break
 
             logger.warning(
                 "LLM 调用失败，%.1fs 后重试（第 %d/%d 次）：%s",
@@ -202,15 +245,130 @@ class LLMClient:
             )
             await asyncio.sleep(delay)
 
-        raise AssertionError("unreachable")  # 循环里要么 return 要么 raise
+        raise LLMError(f"重试 {self.max_retries} 次后仍然失败：{error}") from error
+
+    async def _post_full(self, payload: dict) -> httpx.Response:
+        """非流式：一次拿到完整响应。"""
+
+        async def once() -> httpx.Response:
+            response = await self._client.post("/chat/completions", json=payload)
+            if response.status_code in RETRYABLE_STATUS:
+                raise _Retryable(
+                    f"HTTP {response.status_code}: {response.text[:200]}",
+                    _parse_retry_after(response.headers.get("retry-after")),
+                )
+            # 成功，或者「重试也没用」。两种情况都原样交给上层判断
+            return response
+
+        return await self._attempt(once)
+
+    async def _post_stream(
+        self, payload: dict, on_delta: "DeltaHook"
+    ) -> tuple[dict, TokenUsage]:
+        """流式：边收边把文字交给 on_delta，最后拼出完整消息。
+
+        解析写在 operation **外面**（见 _attempt 的注释）——
+        一旦开始吐内容就不能重试了。
+        """
+
+        async def once() -> tuple[dict, TokenUsage]:
+            # stream() 进入时就把请求发出去、拿到响应头 —— 所以 429/5xx
+            # 在这一层就能判，此时**一个字节都还没交给用户**，重试是安全的
+            async with self._client.stream(
+                "POST", "/chat/completions", json=payload
+            ) as response:
+                if response.status_code in RETRYABLE_STATUS:
+                    await response.aread()
+                    raise _Retryable(
+                        f"HTTP {response.status_code}: {response.text[:200]}",
+                        _parse_retry_after(response.headers.get("retry-after")),
+                    )
+                if response.status_code >= 400:
+                    await response.aread()
+                    response.raise_for_status()
+
+                # 到这里才开始读 body。之后再出错就不能重试了 ——
+                # 用户已经看到一部分内容，重来一遍只会看到重复的一坨
+                try:
+                    return await self._read_sse(response, on_delta)
+                except httpx.HTTPError as e:
+                    raise LLMError(f"流式响应中断: {e}") from e
+
+        return await self._attempt(once)
+
+    async def _read_sse(
+        self, response: httpx.Response, on_delta: "DeltaHook"
+    ) -> tuple[dict, TokenUsage]:
+        """解析 SSE 流，拼出 assistant 消息。
+
+        usage 只在**最后一个** chunk 里，而且要先在请求里带
+        `stream_options.include_usage`（见 chat）。
+        """
+        parts: list[str] = []
+        fragments: dict[int, dict] = {}
+        usage = TokenUsage()
+
+        async for line in response.aiter_lines():
+            if not line.startswith("data:"):
+                continue  # 空行、event: 行、注释行都跳过
+            data = line[len("data:") :].strip()
+            if not data or data == "[DONE]":
+                continue
+
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                logger.warning("跳过无法解析的流式分片: %s", data[:120])
+                continue
+
+            if chunk.get("usage"):
+                usage = _usage_of(chunk)
+
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+
+            text = delta.get("content")
+            if text:
+                parts.append(text)
+                on_delta(text)
+
+            for fragment in delta.get("tool_calls") or []:
+                _merge_tool_call(fragments, fragment)
+
+        return (
+            _normalize_message(
+                {
+                    "role": "assistant",
+                    "content": "".join(parts) or None,
+                    "tool_calls": [
+                        fragments[i] for i in sorted(fragments)
+                    ] or None,
+                }
+            ),
+            usage,
+        )
 
     # ------------------------------------------------------------ 调用
 
-    async def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
+    def _record(self, usage: TokenUsage) -> None:
+        self.usage = self.usage + usage
+        self.last_prompt_tokens = usage.prompt_tokens
+
+    async def chat(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        on_delta: DeltaHook | None = None,
+    ) -> dict:
         """发起一次 chat completion，返回 assistant message。
 
         有 tool_calls 时，返回的 message 里会带 tool_calls 字段；
         没有时，content 就是模型的最终回答。
+
+        on_delta 给了就走流式：模型每吐出一小段文字就回调一次。
+        不给就走整包（SubAgent / AutoDream 不需要流式，也少一层解析）。
         """
         payload: dict[str, Any] = {
             "model": self._model,
@@ -220,7 +378,15 @@ class LLMClient:
         if tools:
             payload["tools"] = tools
 
-        resp = await self._post_with_retry(payload)
+        if on_delta is not None:
+            payload["stream"] = True
+            # usage 默认不在流式响应里，得显式要 —— 不要的话 token 统计全变 0
+            payload["stream_options"] = {"include_usage": True}
+            message, usage = await self._post_stream(payload, on_delta)
+            self._record(usage)
+            return message
+
+        resp = await self._post_full(payload)
 
         try:
             resp.raise_for_status()
@@ -231,9 +397,7 @@ class LLMClient:
 
         try:
             data = resp.json()
-            usage = _usage_of(data)
-            self.usage = self.usage + usage
-            self.last_prompt_tokens = usage.prompt_tokens
+            self._record(_usage_of(data))
             return _normalize_message(data["choices"][0]["message"])
         except (KeyError, IndexError, ValueError) as e:
             raise LLMError(f"LLM 响应结构异常: {resp.text[:500]}") from e

@@ -207,7 +207,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
   - [x] 7a — Retry + Token Management
   - [x] 7b — Context Compaction
   - [x] 7c — Permission
-  - [ ] 7d — Parallel SubAgent / Streaming / Web UI
+  - [ ] 7d — Parallel SubAgent / Streaming✅ / Web UI
 
 Logging 与 Async 在前六个阶段已经顺手做掉了：每个模块一个 logger；从 Phase 1 起就是
 async 的，遗留只是搜索时的同步文件 IO 会短暂阻塞事件循环（当前规模无感）。
@@ -375,6 +375,7 @@ python main.py --session e649 "接着问"                 # 续指定会话（�
 python main.py --list-sessions                         # 列出最近的会话
 python main.py --consolidate                           # 强制整理一次记忆后退出
 python main.py --no-consolidate "随便问问"              # 这次跑完不检查整理
+python main.py --no-stream "别流式"                     # 关掉逐字输出
 python main.py --yes "给脚本用"                         # 跳过权限确认（交互时别加）
 python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 ```
@@ -383,9 +384,30 @@ python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 恢复会话时会校验记录的 root 与当前是否一致 —— 项目被改名或搬走后，
 旧会话会明确报错而不是在错位的上下文里继续跑。
 
+**默认流式输出**：模型说的话一个字一个字冒出来，不用等整段生成完。
+`--no-stream` 关掉。只有模型说的**话**是流式的；工具调用和结果是按步显示的日志。
+
 **执行顺序是先给答案、再跑整理**（整理可能几十秒，不该挡在答案前面）。
 整理失败只记一条 warning，不影响已经拿到的答案。达到步数上限时也不再甩 traceback，
-而是告诉你会话 id —— 过程已经逐条落盘，`--continue` 就能接着聊。
+而是告诉你会话 id + 它中断前的最后进展 —— 过程已经逐条落盘，`--continue` 就能接着聊。
+
+### 流式实现的两个坑
+
+**`tool_calls` 在流式下是碎片。** 非流式时 `arguments` 是一个完整字符串，流式时它
+一片一片地来，而 `id` 和 `name` 只在第一片里出现：
+
+```
+{"index":0,"id":"call_1","function":{"name":"Read","arguments":""}}
+{"index":0,"function":{"arguments":"{\"pa"}}
+{"index":0,"function":{"arguments":"th\":\"a.py\"}"}}
+```
+
+要按 `index` 累加。**拼错不会立刻报错**，只会让工具名变成空字符串、或者参数少了前半截，
+然后在几步之后莫名其妙地失败。
+
+**重试的边界变了。** 响应头到达之前的失败（429 / 5xx / 连不上）照样重试；
+**body 一旦开始往用户那边吐就不能重试了** —— 用户已经看到内容，重来一遍只会看到
+重复的一坨。所以重试的粒度是「发请求 + 判状态码」这一整段，流式解析在它之外。
 
 ## 开发原则
 

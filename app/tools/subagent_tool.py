@@ -211,15 +211,10 @@ class SubAgentTool(SandboxedTool):
         except MaxIterationError as e:
             # 子 Agent 的"没跑完"不是 Runtime 的失败，而是一种正常结果 ——
             # 转成文本回给 Main，让它自己决定要不要换个方式再来。
-            # 进展由循环自己带在异常里（e.partial），不用在这里再捞一遍
+            # 进展由循环带在异常里（e.partial）：「调了哪些工具 + 最后说了什么」
             logger.warning("[subagent] %s 未完成: %s", agent_type, e)
-            if e.partial:
-                return ToolResult(
-                    f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限]\n"
-                    f"以下是它中断前的最后输出：\n{e.partial}"
-                )
             return ToolResult(
-                f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限] 没有任何中间结论。"
+                f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限]\n{e.partial}"
             )
         except LLMError as e:
             logger.warning("[subagent] %s LLM 调用失败: %s", agent_type, e)

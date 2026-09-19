@@ -20,6 +20,7 @@
 """
 
 import logging
+from collections import Counter
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from app.llm.client import LLMClient
@@ -44,12 +45,49 @@ MessageHook = Callable[[dict], None]
 
 
 def last_progress(messages: list[dict]) -> str:
-    """从历史里捞出模型最后一段有内容的发言。
+    """给「跑到上限」用的收尾报告。
 
-    跑到步数上限时用得上：那通常**不是**一无所获，而是「查了一大堆但没来得及收尾」。
-    直接丢掉等于让调用方白付一次 token。run_react_loop 又是就地改 messages 的，
-    所以这些内容本来就在手边。
+    **只报最后一句助手发言是不够的。** 实测里模型经常十几步都只调工具、
+    不说话（一路 pytest → 改 → 再 pytest），那时最后一条有文字的消息
+    可能是**第 1 步**的开场白 —— 报出来等于没说：
+    「它中断前的最后进展：我先看一下项目结构和 tests 目录的现状。」
+
+    所以主体是**工具活动**（那才是「做了多少」的事实），
+    模型最后说的话作为补充（有才加）。
     """
+    lines: list[str] = []
+
+    counts: Counter[str] = Counter()
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            counts[call.get("function", {}).get("name", "?")] += 1
+    if counts:
+        detail = "、".join(f"{name}×{n}" for name, n in counts.most_common())
+        lines.append(f"调用了 {sum(counts.values())} 次工具：{detail}")
+
+    action = _last_action(messages)
+    if action:
+        name, args = action
+        lines.append(f"最后一步：{name} {args[:160]}")
+
+    text = _last_assistant_text(messages)
+    if text:
+        lines.append(f"它最后说的话：\n{text}")
+
+    return "\n".join(lines)
+
+
+def _last_action(messages: list[dict]) -> tuple[str, str] | None:
+    """最后一个工具调用的（名字，参数原文）。"""
+    for message in reversed(messages):
+        calls = message.get("tool_calls")
+        if calls:
+            function = calls[-1].get("function", {})
+            return function.get("name", "?"), str(function.get("arguments") or "")
+    return None
+
+
+def _last_assistant_text(messages: list[dict]) -> str:
     for message in reversed(messages):
         if message.get("role") == "assistant" and message.get("content"):
             return str(message["content"]).strip()

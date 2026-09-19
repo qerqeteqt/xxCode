@@ -166,32 +166,46 @@ def test_raises_max_iteration_error():
     assert len(llm.calls) == 3
 
 
-def test_撞上限时把最后的进展带出来():
+def test_撞上限时报告做了什么而不只是最后说了什么():
     """跑到上限通常不是一无所获，而是「查了一大堆没来得及收尾」。
-    白扔掉等于让调用方白付一次 token。"""
+
+    只报最后一句发言是不够的：实测里模型经常十几步都只调工具、不说话，
+    那时最后一条有文字的消息可能是**第 1 步**的开场白，报出来等于没说。
+    """
     llm = FakeLLM(
         [
             _assistant("我先看看这个文件怎么被用的", tool_calls=[_tool_call("Read")]),
-            _assistant(tool_calls=[_tool_call("Read")]),
+            _assistant(tool_calls=[_tool_call("Bash")]),
+            _assistant(tool_calls=[_tool_call("Bash")]),
         ]
     )
 
     with pytest.raises(MaxIterationError) as exc_info:
-        _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=2))
+        _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=3))
 
-    assert exc_info.value.partial == "我先看看这个文件怎么被用的"
+    report = exc_info.value.partial
+    # 工具活动是主体 —— 它才是「做了多少」的事实
+    assert "调用了 3 次工具" in report
+    assert "Bash×2" in report
+    assert "Read×1" in report
+    assert "最后一步：Bash" in report
+    # 模型说的话作为补充
+    assert "我先看看这个文件怎么被用的" in report
 
 
-def test_没有中间发言时_partial_为空():
-    llm = FakeLLM([_assistant(tool_calls=[_tool_call("Read")])])
+def test_全程没说过话也能报出做了什么():
+    """那种「一路 pytest → 改 → 再 pytest」的调试循环就是这种形状。"""
+    llm = FakeLLM([_assistant(tool_calls=[_tool_call("Bash")])])
 
     with pytest.raises(MaxIterationError) as exc_info:
         _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=1))
 
-    assert exc_info.value.partial == ""
+    report = exc_info.value.partial
+    assert "调用了 1 次工具：Bash×1" in report
+    assert "它最后说的话" not in report  # 没有就别硬凑
 
 
-def test_last_progress_取最后一条有内容的发言():
+def test_last_progress_报的是最后一条发言而不是第一条():
     from app.agent.react_loop import last_progress
 
     history = [
@@ -199,11 +213,14 @@ def test_last_progress_取最后一条有内容的发言():
         {"role": "tool", "content": "工具结果不算"},
         {"role": "assistant", "content": None, "tool_calls": [{"id": "c"}]},
         {"role": "assistant", "content": " 最后说的 "},
-        {"role": "tool", "content": "结果",
-         "tool_call_id": "c"},
+        {"role": "tool", "content": "结果", "tool_call_id": "c"},
     ]
 
-    assert last_progress(history) == "最后说的"
+    report = last_progress(history)
+
+    assert "最后说的" in report
+    assert "早先说的" not in report
+    assert "调用了 1 次工具" in report  # 那一条 tool_calls 也数进去
 
 
 def test_max_iteration_消息不会被套两层():

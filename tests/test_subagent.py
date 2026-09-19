@@ -284,7 +284,9 @@ def test_超步数时把中间结论带回来(tmp_path, monkeypatch):
     assert "我先看一下目录结构" in result
 
 
-def test_超步数且无中间结论时如实说明(tmp_path, monkeypatch):
+def test_超步数时至少报出它做了什么(tmp_path, monkeypatch):
+    """模型一句话没说就撞上限时，别只回一句「没有任何中间结论」——
+    把工具活动报出来，Main 才知道它到底干到哪了。"""
     monkeypatch.setitem(
         AGENT_SPECS,
         "Explore",
@@ -300,4 +302,6 @@ def test_超步数且无中间结论时如实说明(tmp_path, monkeypatch):
 
     result = _run(tool.execute(agent_type="Explore", task="看看", context=None)).text
 
-    assert "没有任何中间结论" in result
+    assert "未完成" in result
+    assert "1 步上限" in result
+    assert "调用了 1 次工具：List×1" in result

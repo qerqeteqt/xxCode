@@ -390,3 +390,51 @@ def _parse_sse(text: str) -> list[dict]:
         if kind and payload:
             out.append({"type": kind, "data": json.loads(payload)})
     return out
+
+
+class _NeverFinishesLLM(_FakeLLM):
+    """永远返回 tool_calls —— 用来把循环逼到步数上限。"""
+
+    async def chat(self, messages, tools=None, on_delta=None):
+        self.usage = TokenUsage(100, 10, self.usage.calls + 1)
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c",
+                    "type": "function",
+                    "function": {"name": "List", "arguments": '{"path": "."}'},
+                }
+            ],
+        }
+
+
+def test_撞上限的会话标为_failed_并记下用量(tmp_path, monkeypatch):
+    """两个只有在真实使用里才暴露的 bug：
+
+    1. 原先 finally 里不管成败都 finish("finished") —— 撞上限中断的会话
+       在列表里显示成正常结束，查问题时会误导
+    2. web 端从来不调 session.record_usage —— 会话列表里 token 永远是 0
+    """
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _NeverFinishesLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        resp = client.post(
+            "/api/chat",
+            json={"session_id": session.session_id, "question": "一直干下去"},
+        )
+        events = _parse_sse(resp.text)
+
+    error = next(e for e in events if e["type"] == "error")
+    assert "最大循环次数" in error["data"]["message"]
+    # 报告里要有「做了什么」，而不是一句开场白
+    assert "调用了" in error["data"]["partial"]
+    assert error["data"]["can_continue"] is True
+
+    reloaded = SessionStore(tmp_path).load(session.session_id)
+    assert reloaded.state.status == "failed"  # 不是 finished
+    assert reloaded.state.total_tokens > 0  # 用量记下来了

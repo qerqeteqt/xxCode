@@ -440,6 +440,7 @@ def create_app(root: str | Path) -> FastAPI:
         live.attach(queue)
 
         async def run() -> None:
+            answer: str | None = None
             try:
                 answer = await live.agent.run(payload.question)
                 queue.put_nowait(
@@ -457,8 +458,18 @@ def create_app(root: str | Path) -> FastAPI:
                 await _extract_memory(queue, live)
                 await _consolidate_if_due(queue, live)
             except MaxIterationError as e:
+                # can_continue 让前端画一个「接着上次继续」的按钮。
+                # 撞上限**通常不是失败**，是「做到一半」—— 历史都还在会话里，
+                # 直接接着问就行，不用回终端敲 --continue
                 queue.put_nowait(
-                    Event("error", {"message": str(e), "partial": e.partial})
+                    Event(
+                        "error",
+                        {
+                            "message": str(e),
+                            "partial": e.partial,
+                            "can_continue": True,
+                        },
+                    )
                 )
             except Exception as e:  # noqa: BLE001 —— 出错要送回浏览器，不能让流干挂着
                 logger.exception("会话执行出错")
@@ -466,8 +477,14 @@ def create_app(root: str | Path) -> FastAPI:
                     Event("error", {"message": f"{type(e).__name__}: {e}"})
                 )
             finally:
-                # 会话状态落盘：和 CLI 一样，失败也要留下痕迹
-                live.session.finish("finished")
+                # 状态要如实写：原先这里不管成败都写 "finished"，
+                # 结果撞上限中断的会话在列表里显示成正常结束 —— 查问题时会误导
+                live.session.record_usage(
+                    live.llm.usage.prompt_tokens,
+                    live.llm.usage.completion_tokens,
+                    live.llm.usage.calls,
+                )
+                live.session.finish("finished" if answer else "failed")
                 live.busy = False
                 live.detach()
                 queue.put_nowait(None)  # 结束哨兵

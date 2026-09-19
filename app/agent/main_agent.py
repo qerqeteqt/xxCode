@@ -3,29 +3,26 @@
 它是「装配者」而不是「思考者」：把 system prompt、用户问题、工具 schema 组装成
 一次调用的输入，然后交给 ReAct Loop 去跑。
 
-Phase 1 它还很简单：准备 prompt + 驱动循环。
-Phase 2 起它多两件事：把 ToolRegistry 的 schema 传给 loop，把 registry.execute
-作为 execute_tool 注入进去（就是下面那个占位函数的位置）。
-
-注意 MainAgent 自己不持有 tools 的具体实现，只持有「能执行 tool_call 的函数」，
-和 Loop 保持同一个抽象层级。
+Phase 2 起它持有 ToolRegistry：schema 从 registry 取，执行也从 registry 走。
+注意它**仍然不认识任何具体工具** —— Read 还是 Bash 对它来说都是「registry 里的
+一个名字」，和 ReAct Loop 保持同一个抽象层级。
 """
 
 from app.agent.react_loop import ExecuteTool, run_react_loop
 from app.llm.client import LLMClient
+from app.tools.registry import ToolRegistry
 
-DEFAULT_SYSTEM_PROMPT = (
-    "你是一个 Code Agent，可以读写代码文件、执行命令、搜索代码库。"
-    "能直接回答的问题就直接回答；需要查看或修改代码时，调用相应的工具。"
-)
+DEFAULT_SYSTEM_PROMPT = """你是一个 Code Agent，可以读写代码文件、执行命令、搜索代码库。
+
+工作方式：
+- 先用 Glob / Grep 定位，再用 Read 确认原文，最后才动手改
+- 改局部内容用 Edit，不要用 Write 整体覆盖
+- 所有路径都相对项目根目录，不要试图访问项目外的文件
+- 能直接回答的问题就直接回答，不要为了用工具而用工具"""
 
 
 async def _no_tools_available(tool_call: dict) -> str:
-    """Phase 1 的占位实现：还没有任何工具被注册。
-
-    它存在的意义不是「能用」，而是把注入点显式暴露出来 ——
-    Phase 2 换成 ToolRegistry.execute 时，改的就是这一行的位置。
-    """
+    """没注册任何工具时的兜底执行器（Phase 1 的行为）。"""
     name = tool_call.get("function", {}).get("name")
     return f"当前没有注册任何工具（被请求的工具: {name}）"
 
@@ -34,16 +31,21 @@ class MainAgent:
     def __init__(
         self,
         llm: LLMClient,
-        execute_tool: ExecuteTool | None = None,
-        tools: list[dict] | None = None,
+        registry: ToolRegistry | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_steps: int = 10,
     ) -> None:
         self._llm = llm
-        self._execute_tool = execute_tool or _no_tools_available
-        self._tools = tools
         self._system_prompt = system_prompt
         self._max_steps = max_steps
+
+        # registry 是可选依赖：不传就是 Phase 1 那种「没有工具」的状态。
+        # 两种能力（schema 给模型看、execute 真执行）都从同一个对象取，
+        # 不会出现「告诉模型有 Read 工具，但执行时找不到」这种不一致。
+        self._tools = registry.schemas() if registry is not None else None
+        self._execute_tool: ExecuteTool = (
+            registry.execute if registry is not None else _no_tools_available
+        )
 
     async def run(self, question: str, messages: list[dict] | None = None) -> str:
         """回答一个问题。

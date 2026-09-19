@@ -274,7 +274,8 @@ cp .env.example .env   # 然后填入真实的 LLM_API_KEY
 
 ## 已注册的工具
 
-由 `build_default_registry(root, llm=None)` 集中装配，全部共用同一个 `Sandbox(root)`：
+由 `build_default_registry(root, llm=None, tavily_api_key="")` 集中装配，
+全部共用同一个 `Sandbox(root)`：
 
 | 工具 | 用途 |
 |---|---|
@@ -285,11 +286,30 @@ cp .env.example .env   # 然后填入真实的 LLM_API_KEY
 | `Glob` | 按文件名 glob 模式查找文件 |
 | `Grep` | 按内容正则搜索，返回 `文件:行号: 那一行` |
 | `Bash` | 在项目根目录执行命令，返回 exit code / stdout / stderr |
+| `WebSearch` | 联网搜索（Tavily），返回标题 / 链接 / 摘要。**配了 `TAVILY_API_KEY` 才注册** |
 | `SubAgent` | 派一个子 Agent 独立完成任务，只带回结论（需要 `llm` 才会注册） |
 
 `ToolRegistry.execute()` 的契约是**永不抛异常** —— 工具名不存在、`arguments` 不是合法
 JSON、参数不符合 schema、工具自身执行失败，四种情况都会转成一条模型看得懂的消息回灌，
 让它自己纠正。
+
+### WebSearch 和 Glob / Grep 容易混
+
+    Glob / Grep   搜**这个项目**里的东西
+    WebSearch     搜**互联网**上的东西
+
+工具描述里写死了「搜本地代码请用 Glob / Grep」—— 不写的话模型会拿它去搜项目里的
+函数名，白花一次网络请求还不知道自己在干什么。
+
+两个代价：
+
+1. **关键词会发到外部服务。** 所以不能把代码或密钥塞进 query。这条靠 prompt 提醒，
+   不靠技术强制 —— 真要强制就得在本地做关键词脱敏，那个误伤率高得离谱
+2. **它给的是摘要，不是原文。** 所以返回值末尾会提醒模型：需要细节就换个更具体的
+   关键词再搜，或者把链接给用户自己看，而**不是拿着半截摘要下结论**
+
+**没配 `TAVILY_API_KEY` 就不注册这个工具** —— 又是「能力由装配决定」：
+没有 key 就是没有这个能力，而不是注册上去、调用时才报错。
 
 Bash 的安全档位目前是「危险命令黑名单」，挡的是**误伤而非攻击者**；
 完整的权限系统（可配置策略 / 人工确认 / 容器隔离）属于 Phase 7。

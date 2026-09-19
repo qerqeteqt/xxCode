@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_timeout: float = 60.0
 
+    # Tavily 联网搜索的 key。**留空就不注册 WebSearch 工具** ——
+    # 又是「能力由装配决定」：没有 key 就是没有这个能力，
+    # 而不是注册上去、调用时才报错
+    tavily_api_key: str = ""
+
     # ReAct Loop 的最大循环次数，超了就抛 MaxIterationError。
     #
     # **它的定位是「防打转的兜底」，不是「预算」。**

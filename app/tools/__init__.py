@@ -23,6 +23,7 @@ from app.tools.registry import ToolRegistry, TrackingRegistry
 from app.tools.sandbox import PathOutOfSandboxError, Sandbox
 from app.tools.search_tool import GlobTool, GrepTool
 from app.tools.subagent_tool import SubAgentTool, build_sub_registry
+from app.tools.web_tool import WebSearchTool
 
 __all__ = [
     "BashTool",
@@ -44,6 +45,7 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "TrackingRegistry",
+    "WebSearchTool",
     "WriteTool",
     "build_default_registry",
     "build_sub_registry",
@@ -56,6 +58,7 @@ def build_default_registry(
     on_file_changed: Callable[[str], None] | None = None,
     gate: PermissionGate | None = None,
     on_event: EventHook | None = None,
+    tavily_api_key: str = "",
 ) -> ToolRegistry:
     """按项目根目录装配一整套工具。
 
@@ -69,6 +72,9 @@ def build_default_registry(
     on_file_changed 是给 Session 用的：文件真被改动时回调一次，用来增量更新
     State 里的 files_changed。这里只收一个普通回调，不 import Session ——
     工具层不该知道会话的存在。
+
+    tavily_api_key 同理可选：没配 key 就**不注册** WebSearch，
+    而不是注册上去、调用时才报错。
     """
     sandbox = Sandbox(root)
     registry = TrackingRegistry(on_change=on_file_changed, gate=gate, on_event=on_event)
@@ -82,6 +88,9 @@ def build_default_registry(
         BashTool(sandbox),
     ):
         registry.register(tool)
+
+    if tavily_api_key:
+        registry.register(WebSearchTool(tavily_api_key))
 
     if llm is not None:
         registry.register(SubAgentTool(sandbox, llm, gate=gate, on_event=on_event))

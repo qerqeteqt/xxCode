@@ -148,6 +148,7 @@ class LiveSession:
             on_file_changed=session.add_changed_file,
             gate=self.gate,
             on_event=self._on_event,
+            tavily_api_key=settings.tavily_api_key,
         )
         self.memory = MemoryManager(root)
         self.memory.sync_index()

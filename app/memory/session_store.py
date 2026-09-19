@@ -109,7 +109,7 @@ class SessionInfo:
     files_changed: list[str]
 
 
-def _read_records(path: Path) -> list[dict]:
+def read_records(path: Path) -> list[dict]:
     """读一个 JSONL 文件，跳过坏行。
 
     为什么要容忍坏行：append-only 的代价是「最后一行可能是写了一半的」。
@@ -178,20 +178,24 @@ class Session:
 
     # ---------------------------------------------------------- 读取
 
+    def records(self) -> list[dict]:
+        """原始记录。给 AutoDream 这类需要看「会话全貌」的消费者用。"""
+        return read_records(self.path)
+
     def load_messages(self) -> list[dict]:
         """读出可以直接喂给 LLM 的 messages。
 
         零转换：JSONL 里存的就是原样的 API 消息，这里只是把它们摘出来。
-        system 消息也在里面，所以恢复会话时不需要另外拼 system prompt。
+        不含 system —— 那是每次运行现拼的配置，不落盘（见 MainAgent.run）。
         """
         return [
             record["message"]
-            for record in _read_records(self.path)
+            for record in read_records(self.path)
             if record.get("type") == "message" and isinstance(record.get("message"), dict)
         ]
 
     def summary(self) -> SessionInfo:
-        records = _read_records(self.path)
+        records = read_records(self.path)
         started_at, status = "", "running"
         for record in records:
             if record.get("type") == "session_start":
@@ -229,7 +233,7 @@ class SessionStore:
         session.start(self.root)
         return session
 
-    def _iter_session_files(self) -> list[Path]:
+    def session_files(self) -> list[Path]:
         """所有会话文件，**最近活跃的在前**。
 
         排序用 mtime 而不是文件名：文件名里带的是**创建**时间，而 --continue 想要的
@@ -262,7 +266,7 @@ class SessionStore:
 
         matches = [
             path
-            for path in self._iter_session_files()
+            for path in self.session_files()
             if path.stem == needle
             or path.stem.startswith(needle)
             or path.stem.endswith(needle)
@@ -278,17 +282,17 @@ class SessionStore:
         return matches[0]
 
     def latest(self) -> Path | None:
-        files = self._iter_session_files()
+        files = self.session_files()
         return files[0] if files else None
 
     def list_sessions(self, limit: int = 10) -> list[SessionInfo]:
-        return [self._open(path).summary() for path in self._iter_session_files()[:limit]]
+        return [self._open(path).summary() for path in self.session_files()[:limit]]
 
     # ---------------------------------------------------------- 打开
 
     def _open(self, path: Path) -> Session:
         """从文件构造 Session 对象（含 root 校验），不做别的副作用。"""
-        records = _read_records(path)
+        records = read_records(path)
         start = next((r for r in records if r.get("type") == "session_start"), None)
         if start is None:
             raise SessionError(f"{path.name} 不是合法的会话文件：没有 session_start 记录")
@@ -310,6 +314,10 @@ class SessionStore:
                 state.status = record.get("status", state.status)
 
         return Session(self, path.stem, path, state)
+
+    def session_at(self, path: Path) -> Session:
+        """按路径打开会话（同样做 root 校验）。AutoDream 遍历历史会话时用这个。"""
+        return self._open(path)
 
     def load(self, session_id_or_prefix: str) -> Session:
         return self._open(self.find(session_id_or_prefix))

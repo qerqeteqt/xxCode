@@ -1,14 +1,18 @@
 """入口。
 
     python main.py "你的问题"                     新会话
-    python main.py --continue "接着问"            续最近一次会话
-    python main.py --session a3f2 "接着问"        续指定会话（支持唯一前缀）
+    python main.py --continue "接着问"            续最近活跃的会话
+    python main.py --session a3f2 "接着问"        续指定会话（前后缀都认）
     python main.py --list-sessions                列出最近的会话
+    python main.py --consolidate                  强制整理一次长期记忆后退出
 
 --root 决定 agent 能看哪个项目，同时也就是路径沙箱的边界。默认取当前工作目录；
 因为「沙箱根 = 你此刻所在目录」这件事不够显然，启动时会把它打出来。
 
 会话记录落在 <root>/.agent/sessions/<日期>/<会话id>.jsonl（append-only）。
+长期记忆落在 <root>/.agent/memory/，由 AutoDream 整理。
+
+**顺序是先给你答案，再跑记忆整理。** 整理可能要几十秒，不该挡在答案前面。
 """
 
 import argparse
@@ -18,16 +22,20 @@ import sys
 from pathlib import Path
 
 from app.agent.main_agent import MainAgent
+from app.agent.react_loop import MaxIterationError
 from app.llm.client import LLMClient
 from app.memory import MemoryManager
 from app.memory.session_store import SessionError, SessionStore
+from app.scheduler import Scheduler
 from app.tools import build_default_registry
 from config.settings import get_settings
 
 logger = logging.getLogger("xxcode")
 
 
-async def _run(question: str, root: Path, session_ref: str | None, resume: bool) -> str:
+async def _run_session(
+    question: str, root: Path, session_ref: str | None, resume: bool
+) -> str:
     settings = get_settings()
     store = SessionStore(root)
 
@@ -73,6 +81,14 @@ async def _run(question: str, root: Path, session_ref: str | None, resume: bool)
 
         try:
             answer = await agent.run(question)
+        except MaxIterationError as e:
+            # 达到步数上限：过程已经逐条落盘了（on_message 钩子），
+            # 所以这里能告诉用户「去哪接着聊」，而不是让他从头再来一遍
+            session.finish("failed")
+            raise MaxIterationError(
+                f"{e}。本次过程已保存在会话 {session.session_id}，"
+                f'用 python main.py --continue "接着上次" 可以继续'
+            ) from None
         except BaseException:
             # 包括 Ctrl+C 和 LLM 报错。会话文件里要留下「这次没跑完」的痕迹，
             # 否则下次 --continue 会以为上次是正常结束的
@@ -81,6 +97,28 @@ async def _run(question: str, root: Path, session_ref: str | None, resume: bool)
 
         session.finish("finished")
         return answer
+
+
+async def _run_consolidation(root: Path, *, force: bool) -> None:
+    """跑一次（或检查一次）记忆整理。和会话完全独立的两件事。"""
+    settings = get_settings()
+    scheduler = Scheduler(
+        root,
+        min_hours=settings.consolidate_min_hours,
+        min_sessions=settings.consolidate_min_sessions,
+    )
+
+    async with LLMClient(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        timeout=settings.llm_timeout,
+    ) as llm:
+        result = await scheduler.consolidate(llm, force=force)
+
+    print(f"\n[记忆整理] {result.summary}")
+    if result.changed:
+        print(f"[记忆整理] 改动: {', '.join(result.changed)}")
 
 
 def _print_sessions(root: Path, limit: int) -> None:
@@ -126,6 +164,17 @@ def main() -> None:
         metavar="N",
         help="列出最近 N 个会话后退出（默认 10）",
     )
+    parser.add_argument(
+        "--consolidate",
+        action="store_true",
+        help="强制整理一次长期记忆后退出（跳过触发条件判断）",
+    )
+    parser.add_argument(
+        "--no-consolidate",
+        dest="no_consolidate",
+        action="store_true",
+        help="本次会话结束后不检查记忆整理",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -141,17 +190,38 @@ def main() -> None:
         _print_sessions(root, args.list_sessions)
         return
 
+    if args.consolidate:
+        try:
+            asyncio.run(_run_consolidation(root, force=True))
+        except SessionError as e:
+            print(f"错误: {e}", file=sys.stderr)
+            raise SystemExit(1) from None
+        return
+
     question = args.question or "用一句话解释 ReAct 是什么"
 
     try:
-        answer = asyncio.run(_run(question, root, args.session, args.resume))
+        answer = asyncio.run(_run_session(question, root, args.session, args.resume))
     except SessionError as e:
         # 会话相关的失败（找不到、前缀不唯一、root 对不上）是用户能自己修的问题，
         # 不该甩一段 traceback 出来
         print(f"错误: {e}", file=sys.stderr)
         raise SystemExit(1) from None
+    except MaxIterationError as e:
+        # 同理：跑不完是个正常结果，不是程序崩了
+        print(f"\n未能完成：{e}", file=sys.stderr)
+        raise SystemExit(1) from None
 
+    # 先把答案给你看，再跑整理 —— 整理可能几十秒，不该挡在答案前面
     print(f"\n{answer}")
+
+    if not args.no_consolidate:
+        try:
+            asyncio.run(_run_consolidation(root, force=False))
+        except Exception as e:  # noqa: BLE001 —— 见下面的注释
+            # 这里刻意宽兜：整理是「顺带做的事」，失败了绝不能影响用户已经拿到的答案。
+            # 不捕获 BaseException，所以 Ctrl+C 仍然能正常打断。
+            logger.warning("记忆整理出错（不影响本次会话）: %s", e)
 
 
 if __name__ == "__main__":

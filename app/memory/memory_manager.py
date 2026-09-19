@@ -76,6 +76,11 @@ class Memory:
     content: str  # 正文，不含 frontmatter
     path: Path
 
+    @property
+    def rel_path(self) -> str:
+        """相对项目根的路径。给改动追踪和展示用（和 Sandbox.rel 是同一套写法）。"""
+        return f"{MEMORY_DIR}/{self.key}.md"
+
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
     """把文件拆成 (元信息, 正文)。

@@ -25,12 +25,15 @@ app/
   agent/      main_agent.py  react_loop.py  subagent.py
   llm/        client.py
   memory/     session_store.py  memory_manager.py
+              memory_tools.py  auto_dream.py
+  scheduler/  scheduler.py
   tools/      base.py  registry.py  sandbox.py  text.py
               file_tool.py  bash_tool.py  search_tool.py  subagent_tool.py
 .agent/
-  memory/     MEMORY.md  project.md  preferences.md
-              architecture.md  lessons.md
-  sessions/   YYYY-MM-DD/<session_id>.jsonl
+  memory/          MEMORY.md  <key>.md …
+  memory-backups/  <时间戳>/            AutoDream 跑之前的记忆快照
+  sessions/        YYYY-MM-DD/<session_id>.jsonl
+  consolidation.json                    上次整理的时间
 tests/
 config/       settings.py
 main.py
@@ -118,9 +121,44 @@ Agent 用普通的 `Read` / `Grep` 就能读记忆，不需要专用工具。
 这样 Agent 知道有哪些记忆存在；需要细节时再 `Read` 打开具体文件。
 SubAgent 不注入 —— 它是执行者，任务已经很具体，一份索引只会分散注意力。
 
-> **Phase 5 只做了存储层。** 文档第十三节明确把「什么信息值得长期保存」划给了
-> AutoDream，所以 `MemoryManager` 刻意保持"哑"：只有 `list` / `read` / `write` /
-> `update` / `delete` / `sync_index`，不含任何判断。往记忆里自动写东西是 Phase 6 的事。
+> `MemoryManager` 刻意保持"哑"：只有 `list` / `read` / `write` / `update` /
+> `delete` / `sync_index`，不含任何判断 —— 文档第十三节把「什么信息值得长期保存」
+> 划给了 AutoDream。
+
+## 记忆整理（AutoDream）
+
+`Scheduler` 判断该不该整理，该就启动 `AutoDream` 把近期会话提炼成记忆。
+
+触发条件是**并且**关系，都满足才跑：距上次 ≥ `CONSOLIDATE_MIN_HOURS`（默认 24）
+**且** 新增会话 ≥ `CONSOLIDATE_MIN_SESSIONS`（默认 5）。想立刻跑一次用 `--consolidate`。
+
+AutoDream 是第三个拥有独立 Context 的 Agent，它看到的东西**完全由我们喂**：
+
+```
+Main Agent    看得见：整个对话历史 + 项目文件
+SubAgent      看得见：一条 task + 项目文件
+AutoDream     看得见：只有会话摘要 + 现有记忆索引，别的没有任何通道
+```
+
+两处刻意的收缩：
+
+1. **读的是会话「摘要」而不是原始 JSONL**。只取三样：用户问了什么、最终答了什么、
+   改了哪些文件；中间的 Read/Grep 过程全部丢掉。既省 token，也直接服务于文档那句
+   「不应该把整个 Session 原样复制到长期 Memory」—— 如果它看到的本来就是原样 Session，
+   它很可能就照着抄了。
+2. **工具集里只有 `ReadMemory` / `WriteMemory` / `UpdateMemory` / `DeleteMemory`**，
+   没有 Read / Glob / Grep / Bash。它是全系统唯一能写记忆的角色，而它想跑去读项目代码
+   都没有工具可用。
+
+关于「后台」：CLI 跑完就退出，后台 asyncio 任务会跟着进程死。所以这一版取的「后台」
+是文档第十四节要求的那层——**独立于 Main Agent 的循环、不注册进 ToolRegistry**——
+而不是「另一个进程」。`Scheduler.check()` 和 `consolidate()` 是分开的两个方法，
+将来上 Web 把 `check()` 挂到事件循环上定期调用就变成真后台了，这个文件不用改。
+
+**安全网**：跑之前把 `.agent/memory/` 整份快照到 `.agent/memory-backups/<时间戳>/`
+（保留最近 5 份）。AutoDream 手里有 `DeleteMemory`，而它是个 LLM —— 要防它的判断失误、
+防它跑到一半被 Ctrl+C、也方便你事后对比它到底改了什么。整理没跑完就不更新状态文件，
+下次会重试。
 
 ## SubAgent
 
@@ -159,7 +197,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
 - [x] Phase 3 — SubAgent Runtime → Explore / Plan / General-Purpose → SubAgentTool
 - [x] Phase 4 — State → JSONL Session Store
 - [x] Phase 5 — MemoryManager → MEMORY.md → Markdown Memory
-- [ ] Phase 6 — Scheduler → AutoDream → Memory Consolidation
+- [x] Phase 6 — Scheduler → AutoDream → Memory Consolidation
 - [ ] Phase 7 — Retry / Logging / Async / Parallel SubAgent / Permission / Streaming …
 
 ## 环境准备
@@ -208,12 +246,18 @@ python main.py "app/tools 下注册了哪些工具？"          # 新会话
 python main.py --continue "接着上一个问题"             # 续最近活跃的会话
 python main.py --session e649 "接着问"                 # 续指定会话（前后缀都认）
 python main.py --list-sessions                         # 列出最近的会话
+python main.py --consolidate                           # 强制整理一次记忆后退出
+python main.py --no-consolidate "随便问问"              # 这次跑完不检查整理
 python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 ```
 
 `--root` 同时是路径沙箱边界，默认取当前工作目录，启动时会打印出来。
 恢复会话时会校验记录的 root 与当前是否一致 —— 项目被改名或搬走后，
 旧会话会明确报错而不是在错位的上下文里继续跑。
+
+**执行顺序是先给答案、再跑整理**（整理可能几十秒，不该挡在答案前面）。
+整理失败只记一条 warning，不影响已经拿到的答案。达到步数上限时也不再甩 traceback，
+而是告诉你会话 id —— 过程已经逐条落盘，`--continue` 就能接着聊。
 
 ## 开发原则
 

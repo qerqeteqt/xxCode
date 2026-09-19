@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # ReAct Loop 的最大循环次数，超过就抛 MaxIterationError
     max_steps: int = 10
 
+    # 记忆整理（AutoDream）的触发条件。两个是**并且**关系 —— 都满足才跑。
+    # 刻意保守：整理要花真金白银，宁可少跑几次。想立刻跑一次用 --consolidate。
+    consolidate_min_hours: float = 24.0
+    consolidate_min_sessions: int = 5
+
 
 @lru_cache
 def get_settings() -> Settings:

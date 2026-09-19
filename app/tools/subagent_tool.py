@@ -11,7 +11,6 @@
     3. 递归禁止     —— 子 Agent 的工具集里没有 SubAgentTool
 """
 
-import json
 import logging
 
 from pydantic import BaseModel, Field
@@ -19,16 +18,10 @@ from pydantic import BaseModel, Field
 from app.agent.react_loop import MaxIterationError, run_react_loop
 from app.agent.subagent import AGENT_SPECS, AgentSpec, AgentType
 from app.llm.client import LLMClient, LLMError
-from app.tools.base import SandboxedTool, ToolError
+from app.tools.base import SandboxedTool, ToolError, ToolResult
 from app.tools.bash_tool import BashTool
-from app.tools.file_tool import (
-    WRITE_SUCCESS_PREFIXES,
-    EditTool,
-    ListTool,
-    ReadTool,
-    WriteTool,
-)
-from app.tools.registry import ToolRegistry
+from app.tools.file_tool import EditTool, ListTool, ReadTool, WriteTool
+from app.tools.registry import ToolRegistry, TrackingRegistry
 from app.tools.sandbox import Sandbox
 from app.tools.search_tool import GlobTool, GrepTool
 
@@ -50,9 +43,6 @@ _SUB_TOOL_FACTORIES = (
     BashTool,
 )
 
-_WRITE_TOOLS = frozenset({"Write", "Edit"})
-
-
 def _allowed_tools(spec: AgentSpec, sandbox: Sandbox) -> list:
     """按规格过滤出子 Agent 该拿到的工具实例。
 
@@ -72,45 +62,6 @@ def build_sub_registry(spec: AgentSpec, sandbox: Sandbox) -> ToolRegistry:
     for tool in _allowed_tools(spec, sandbox):
         registry.register(tool)
     return registry
-
-
-class _TrackingRegistry(ToolRegistry):
-    """在 ToolRegistry 上加一层记录：子 Agent 实际成功改了哪些文件。
-
-    为什么不让模型自己总结「我改了哪些文件」：模型会漏、会忘、会把「打算改」
-    说成「已经改」。工具调用记录是事实，模型的自述是转述。
-
-    只记成功的：Write/Edit 会因为「old_string 不唯一」这类原因失败，
-    那种情况下文件没动，不该出现在改动清单里。
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.changed_files: list[str] = []
-
-    async def execute(self, tool_call: dict) -> str:
-        name = tool_call.get("function", {}).get("name", "")
-        result = await super().execute(tool_call)
-
-        if name in _WRITE_TOOLS and result.startswith(WRITE_SUCCESS_PREFIXES):
-            path = _extract_path(tool_call)
-            if path and path not in self.changed_files:
-                self.changed_files.append(path)
-
-        return result
-
-
-def _extract_path(tool_call: dict) -> str | None:
-    """从 tool_call 里尽力取出 path 参数。
-
-    取不到就算了 —— 这只是为了生成清单，不值得为它抛异常。
-    """
-    try:
-        args = json.loads(tool_call.get("function", {}).get("arguments") or "{}")
-        path = args.get("path")
-        return str(path) if path else None
-    except (json.JSONDecodeError, AttributeError):
-        return None
 
 
 class _CountingLLM:
@@ -188,7 +139,9 @@ class SubAgentTool(SandboxedTool):
         super().__init__(sandbox)
         self._llm = llm
 
-    async def execute(self, agent_type: AgentType, task: str, context: str | None) -> str:
+    async def execute(
+        self, agent_type: AgentType, task: str, context: str | None
+    ) -> ToolResult:
         spec = AGENT_SPECS.get(agent_type)
         if spec is None:
             # agent_type 已被 schema 约束成枚举，走到这里只可能是 AGENT_SPECS
@@ -204,13 +157,17 @@ class SubAgentTool(SandboxedTool):
             {"role": "user", "content": _compose_task(task, context)},
         ]
 
-        registry = _TrackingRegistry()
+        registry = TrackingRegistry()
         for tool in _allowed_tools(spec, self.sandbox):
             registry.register(tool)
 
         counting_llm = _CountingLLM(self._llm)
 
-        logger.info("[subagent] %s 启动 | 工具: %s", agent_type, ", ".join(t.name for t in registry.list_tools()))
+        logger.info(
+            "[subagent] %s 启动 | 工具: %s",
+            agent_type,
+            ", ".join(t.name for t in registry.list_tools()),
+        )
 
         try:
             answer = await run_react_loop(
@@ -221,27 +178,33 @@ class SubAgentTool(SandboxedTool):
                 max_steps=spec.max_steps,
             )
         except MaxIterationError as e:
+            # 子 Agent 的"没跑完"不是 Runtime 的失败，而是一种正常结果 ——
+            # 转成文本回给 Main，让它自己决定要不要换个方式再来
             partial = _last_progress(messages)
             logger.warning("[subagent] %s 未完成: %s", agent_type, e)
             if partial:
-                return (
+                return ToolResult(
                     f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限]\n"
                     f"以下是它中断前的最后输出：\n{partial}"
                 )
-            return f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限] 没有任何中间结论。"
+            return ToolResult(
+                f"[{agent_type} 未完成：达到 {spec.max_steps} 步上限] 没有任何中间结论。"
+            )
         except LLMError as e:
             logger.warning("[subagent] %s LLM 调用失败: %s", agent_type, e)
-            return f"[{agent_type} 未能执行：LLM 调用失败 —— {e}]"
+            return ToolResult(f"[{agent_type} 未能执行：LLM 调用失败 —— {e}]", ok=False)
 
         # messages 在这里随函数返回被回收 —— 文档要求的「执行结束销毁 Context」
         # 在 Python 里是默认行为，不需要额外代码。真正要防的是相反的事：
         # 别把它挂到 self 上做缓存，那就再也释放不掉了。
 
-        return self._format_result(agent_type, counting_llm.calls, registry, answer)
+        return ToolResult(
+            self._format_result(agent_type, counting_llm.calls, registry, answer)
+        )
 
     @staticmethod
     def _format_result(
-        agent_type: str, steps: int, registry: _TrackingRegistry, answer: str
+        agent_type: str, steps: int, registry: TrackingRegistry, answer: str
     ) -> str:
         header = [f"{agent_type} 完成", f"{steps} 步"]
         if registry.changed_files:

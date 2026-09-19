@@ -24,19 +24,20 @@
 app/
   agent/      main_agent.py  react_loop.py  subagent.py
   llm/        client.py
+  memory/     session_store.py
   tools/      base.py  registry.py  sandbox.py  text.py
               file_tool.py  bash_tool.py  search_tool.py  subagent_tool.py
 .agent/
   memory/     MEMORY.md  project.md  preferences.md
               architecture.md  lessons.md
-  sessions/   YYYY-MM-DD.jsonl
+  sessions/   YYYY-MM-DD/<session_id>.jsonl
 tests/
 config/       settings.py
 main.py
 pytest.ini
 ```
 
-标为「规划中」的模块（`context/`、`memory/`、`scheduler/`）随对应 Phase 落地。
+规划中的模块（`context/`、`scheduler/`）随对应 Phase 落地。
 `.agent/sessions/` 是运行时数据，不入库；`.agent/memory/` 是长期知识，入库。
 
 ## 核心理念
@@ -55,7 +56,34 @@ pytest.ini
   它既是安全边界，也是「这次让 agent 看哪个项目」的开关。
 - **权限靠「能力不存在」实现，不靠 prompt 自律**：只读的 SubAgent 拿不到写类工具，
   子 Agent 的工具集里没有 `SubAgent`。这是事实约束，不是请求模型配合。
+- **工具返回值分两层**：`Tool.execute()` 返回结构化的 `ToolResult(ok, text, changed_path)`，
+  给 Runtime 自己用；`ToolRegistry.execute()` 只把 `text` 交给模型。
+  这样「这个文件到底改成了没有」是读一个字段，而不是嗅探返回文本的前缀。
 - **文件型 Persistence**：Store 实现可替换，未来换数据库不触碰 Runtime 核心逻辑。
+
+## 会话
+
+会话记录是 append-only 的 JSONL，落在 `<root>/.agent/sessions/<日期>/<会话id>.jsonl`：
+
+```jsonl
+{"v":1,"ts":"...","session_id":"20260919-191419-e649","type":"session_start","root":"..."}
+{"v":1,"ts":"...","type":"message","message":{"role":"system","content":"..."}}
+{"v":1,"ts":"...","type":"message","message":{"role":"user","content":"给 calc.py 加个函数"}}
+{"v":1,"ts":"...","type":"message","message":{"role":"assistant","tool_calls":[...]}}
+{"v":1,"ts":"...","type":"state","state":{"status":"running","files_changed":["src/calc.py"]}}
+{"v":1,"ts":"...","type":"session_end","status":"finished"}
+```
+
+两个关键点：
+
+- **`message` 里存的是原样的 API 消息**，恢复时过滤出 `type=="message"` 取出 `.message`
+  就直接得到能喂给 LLM 的 messages —— 零转换。`system` 也在里面，恢复时不用另拼。
+- **append-only**：每条消息产生时立刻写一行。进程崩了，已经发生的事还在。
+  所以 State 也是「每次变化追加一行」，不覆盖写 —— 覆盖写遇到写一半崩溃会留下坏文件。
+
+State 只保留真正有人读的字段（`session_id` / `status` / `files_changed` / 时间戳）。
+文档第八节列的 `task` / `plan` / `findings` 在 V1 没有消费者 —— 模型本来就用自然语言
+在 messages 里表达了它们，再抽一遍只是空转。
 
 ## SubAgent
 
@@ -92,7 +120,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
 - [x] Phase 1 — LLM Client → Agent → ReAct Loop
 - [x] Phase 2 — Tool 抽象 → ToolRegistry → FileTool / BashTool / SearchTool
 - [x] Phase 3 — SubAgent Runtime → Explore / Plan / General-Purpose → SubAgentTool
-- [ ] Phase 4 — State → JSONL Session Store
+- [x] Phase 4 — State → JSONL Session Store
 - [ ] Phase 5 — MemoryManager → MEMORY.md → Markdown Memory
 - [ ] Phase 6 — Scheduler → AutoDream → Memory Consolidation
 - [ ] Phase 7 — Retry / Logging / Async / Parallel SubAgent / Permission / Streaming …
@@ -139,11 +167,16 @@ Bash 的安全档位目前是「危险命令黑名单」，挡的是**误伤而�
 ## 运行
 
 ```bash
-python main.py "app/tools 下注册了哪些工具？"
-python main.py --root D:/pycharm/其他项目 "这个项目的入口在哪"
+python main.py "app/tools 下注册了哪些工具？"          # 新会话
+python main.py --continue "接着上一个问题"             # 续最近活跃的会话
+python main.py --session e649 "接着问"                 # 续指定会话（前后缀都认）
+python main.py --list-sessions                         # 列出最近的会话
+python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 ```
 
 `--root` 同时是路径沙箱边界，默认取当前工作目录，启动时会打印出来。
+恢复会话时会校验记录的 root 与当前是否一致 —— 项目被改名或搬走后，
+旧会话会明确报错而不是在错位的上下文里继续跑。
 
 ## 开发原则
 

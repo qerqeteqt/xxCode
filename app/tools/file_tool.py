@@ -15,7 +15,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.tools.base import SandboxedTool, ToolError
+from app.tools.base import SandboxedTool, ToolError, ToolResult
 from app.tools.sandbox import Sandbox
 from app.tools.text import decode_bytes
 
@@ -25,12 +25,6 @@ MAX_FILE_BYTES = 10 * 1024 * 1024  # 单文件读取上限，防 OOM
 DEFAULT_READ_LINES = 2000
 MAX_READ_LINES = 5000
 MAX_LIST_ENTRIES = 500
-
-# 写类工具**成功**时返回文本的前缀。
-# 单独提出来是因为 SubAgentTool 要靠它判断「这次写入到底成没成功」，才能给出准确的
-# 改动清单 —— 把「尝试过但失败了」误报成「已修改」，会让 Main Agent 向用户传达错误
-# 信息。改下面三个工具的返回文案时，记得这里是被引用的。
-WRITE_SUCCESS_PREFIXES = ("已新建", "已覆盖", "已修改")
 
 
 def _read_text(sandbox: Sandbox, target: Path) -> str:
@@ -74,14 +68,14 @@ class ReadTool(SandboxedTool):
     )
     params_model = ReadParams
 
-    async def execute(self, path: str, offset: int, limit: int) -> str:
+    async def execute(self, path: str, offset: int, limit: int) -> ToolResult:
         target = self.sandbox.resolve(path)
         display = self.sandbox.rel(target)
 
         lines = _read_text(self.sandbox, target).splitlines()
         total = len(lines)
         if total == 0:
-            return f"{display} 是空文件"
+            return ToolResult(f"{display} 是空文件")
         if offset > total:
             raise ToolError(f"offset={offset} 超出范围：{display} 一共只有 {total} 行")
 
@@ -92,7 +86,7 @@ class ReadTool(SandboxedTool):
         if end < total:
             # 必须显式告知「还有多少没读」，否则模型会把这一段当成全文
             body += f"\n…（{display} 共 {total} 行，已显示 {offset}-{end} 行，继续读请用 offset={end + 1}）"
-        return body
+        return ToolResult(body)
 
 
 # ---------------------------------------------------------------- Write
@@ -111,7 +105,7 @@ class WriteTool(SandboxedTool):
     )
     params_model = WriteParams
 
-    async def execute(self, path: str, content: str) -> str:
+    async def execute(self, path: str, content: str) -> ToolResult:
         target = self.sandbox.resolve(path)
         display = self.sandbox.rel(target)
 
@@ -122,7 +116,10 @@ class WriteTool(SandboxedTool):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-        return f"{'已覆盖' if existed else '已新建'} {display}（{len(content)} 字符）"
+        return ToolResult(
+            f"{'已覆盖' if existed else '已新建'} {display}（{len(content)} 字符）",
+            changed_path=display,
+        )
 
 
 # ---------------------------------------------------------------- Edit
@@ -144,7 +141,7 @@ class EditTool(SandboxedTool):
     )
     params_model = EditParams
 
-    async def execute(self, path: str, old_string: str, new_string: str) -> str:
+    async def execute(self, path: str, old_string: str, new_string: str) -> ToolResult:
         target = self.sandbox.resolve(path)
         display = self.sandbox.rel(target)
 
@@ -169,7 +166,9 @@ class EditTool(SandboxedTool):
 
         line_no = text[: text.index(old_string)].count("\n") + 1
         target.write_text(text.replace(old_string, new_string, 1), encoding="utf-8")
-        return f"已修改 {display}（原第 {line_no} 行处）"
+        return ToolResult(
+            f"已修改 {display}（原第 {line_no} 行处）", changed_path=display
+        )
 
 
 # ---------------------------------------------------------------- List
@@ -187,7 +186,7 @@ class ListTool(SandboxedTool):
     )
     params_model = ListParams
 
-    async def execute(self, path: str) -> str:
+    async def execute(self, path: str) -> ToolResult:
         base = self.sandbox.resolve(path)
         display = self.sandbox.rel(base)
 
@@ -198,7 +197,7 @@ class ListTool(SandboxedTool):
 
         files = sorted(self.sandbox.iter_files(base))
         if not files:
-            return f"{display} 下没有文件"
+            return ToolResult(f"{display} 下没有文件")
 
         # 目录从文件路径反推出来 —— 空目录列不出来（os.walk 本来也不产出空目录），
         # 对「了解项目结构」这个用途来说，没有文件的目录也不重要
@@ -219,4 +218,4 @@ class ListTool(SandboxedTool):
         ]
         if truncated:
             lines.append(f"…（共 {len(entries)} 项，只显示前 {MAX_LIST_ENTRIES} 项）")
-        return "\n".join(lines)
+        return ToolResult("\n".join(lines))

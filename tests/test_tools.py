@@ -13,7 +13,9 @@ from pydantic import BaseModel
 
 from app.tools import build_default_registry
 from app.tools.bash_tool import check_dangerous
-from app.tools.base import Tool, ToolError
+from app.tools.base import Tool, ToolError, ToolResult
+from app.tools.file_tool import EditTool, ReadTool, WriteTool
+from app.tools.registry import TrackingRegistry
 from app.tools.sandbox import PathOutOfSandboxError, Sandbox
 
 
@@ -107,8 +109,8 @@ class _EchoTool(Tool):
     description = "回显"
     params_model = _EchoParams
 
-    async def execute(self, text: str) -> str:
-        return f"echo: {text}"
+    async def execute(self, text: str) -> ToolResult:
+        return ToolResult(f"echo: {text}")
 
 
 class _FailTool(Tool):
@@ -116,7 +118,7 @@ class _FailTool(Tool):
     description = "预期内失败"
     params_model = _EchoParams
 
-    async def execute(self, text: str) -> str:
+    async def execute(self, text: str) -> ToolResult:
         raise ToolError("路径不存在: 没有这个文件")
 
 
@@ -125,7 +127,7 @@ class _CrashTool(Tool):
     description = "预期外崩溃"
     params_model = _EchoParams
 
-    async def execute(self, text: str) -> str:
+    async def execute(self, text: str) -> ToolResult:
         raise ValueError("我自己的 bug")
 
 
@@ -450,3 +452,75 @@ def test_bash_超时被强制终止(registry):
 def test_bash_危险命令不执行(registry):
     result = _run(registry.execute(_call("Bash", {"command": "rm -rf /"})))
     assert "被拒绝" in result
+
+
+# ================================================================ ToolResult 与 TrackingRegistry
+
+
+def test_execute_detailed_返回结构化结果(project):
+    registry = TrackingRegistry()
+    registry.register(ReadTool(Sandbox(project)))
+
+    result = _run(registry.execute_detailed(_call("Read", {"path": "app/main.py"})))
+
+    assert result.ok is True
+    assert "def login" in result.text
+    assert result.changed_path is None
+
+
+def test_execute_detailed_失败时_ok_为_False(project):
+    """成败不再靠嗅探文本 —— 四道关卡失败和工具失败统一走 ok=False。"""
+    registry = TrackingRegistry()
+    registry.register(ReadTool(Sandbox(project)))
+
+    result = _run(registry.execute_detailed(_call("Read", {"path": "不存在.py"})))
+
+    assert result.ok is False
+    assert "文件不存在" in result.text
+
+
+def test_execute_仍然只返回字符串(project):
+    """给模型看的那一面没变：registry.execute 还是返回 str。"""
+    registry = TrackingRegistry()
+    registry.register(ReadTool(Sandbox(project)))
+
+    result = _run(registry.execute(_call("Read", {"path": "app/main.py"})))
+
+    assert isinstance(result, str)
+
+
+def test_TrackingRegistry_记录成功的写入(project):
+    registry = TrackingRegistry()
+    registry.register(WriteTool(Sandbox(project)))
+
+    _run(registry.execute(_call("Write", {"path": "a.py", "content": "X = 1\n"})))
+
+    assert registry.changed_files == ["a.py"]
+
+
+def test_TrackingRegistry_失败的写入不记录(project):
+    """Edit 找不到原文时文件没动，不该进清单。"""
+    registry = TrackingRegistry()
+    registry.register(EditTool(Sandbox(project)))
+
+    _run(
+        registry.execute(
+            _call(
+                "Edit",
+                {"path": "app/main.py", "old_string": "不存在", "new_string": "x"},
+            )
+        )
+    )
+
+    assert registry.changed_files == []
+
+
+def test_TrackingRegistry_on_change_每个文件只回调一次(project):
+    seen: list[str] = []
+    registry = TrackingRegistry(on_change=seen.append)
+    registry.register(WriteTool(Sandbox(project)))
+
+    _run(registry.execute(_call("Write", {"path": "a.py", "content": "1\n"})))
+    _run(registry.execute(_call("Write", {"path": "a.py", "content": "2\n"})))
+
+    assert seen == ["a.py"]

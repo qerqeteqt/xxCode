@@ -13,12 +13,35 @@ params_model **生成**出来的。好处是一份定义同时产出两样东西
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from app.tools.sandbox import Sandbox
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """一次工具调用的结果。
+
+    为什么不直接返回字符串：Runtime 内部有两类消费者，需求不一样 ——
+
+        · 模型：只要 text，一句能读懂的话
+        · Runtime：想知道 ok 和 changed_path（累计 files_changed、展示成败）
+
+    把状态编进字符串（比如嗅探返回文本的前缀）能让这两类人都勉强工作，
+    但状态一旦字符串化，类型信息就丢了，调用方只能做文本判断 ——
+    改一句文案就可能悄悄改掉别人的判断结果。
+
+    changed_path 只在真正改动文件时才填（目前是 Write / Edit）。
+    所以「哪些工具算写操作」不再需要一个工具名清单 —— 谁填了就算谁。
+    """
+
+    text: str
+    ok: bool = True
+    changed_path: str | None = None
 
 
 class ToolError(Exception):
@@ -53,14 +76,14 @@ class Tool(ABC):
         }
 
     @abstractmethod
-    async def execute(self, **kwargs: object) -> str:
+    async def execute(self, **kwargs: object) -> ToolResult:
         """执行工具。
 
         kwargs 已经过 params_model 校验，类型可信，可以直接用。
 
-        出错请**抛异常**，不要返回错误字符串 —— 统一由 ToolRegistry 兜住转成文本。
-        这样每个工具只需要关心「正常路径怎么做」和「我为什么失败」，不用到处铺
-        if/else 拼错误消息。
+        出错请**抛异常**，不要自己拼 ToolResult(ok=False) —— 统一由 ToolRegistry
+        兜住并转换。这样每个工具只需要关心「正常路径怎么做」和「我为什么失败」，
+        不用到处铺 if/else 拼错误消息。
         """
         raise NotImplementedError
 

@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # 不在这里，因为 Loop 不该知道任何工具的参数长什么样。
 ExecuteTool = Callable[[dict], Awaitable[str]]
 
+# 每往 messages 里追加一条消息就回调一次。Session 靠它做 append-only 落盘。
+MessageHook = Callable[[dict], None]
+
 
 class MaxIterationError(RuntimeError):
     """循环次数用完仍未得出最终答案。"""
@@ -48,6 +51,7 @@ async def run_react_loop(
     execute_tool: ExecuteTool,
     tools: list[dict] | None = None,
     max_steps: int = 10,
+    on_message: MessageHook | None = None,
 ) -> str:
     """驱动 ReAct 循环，返回模型的最终回答。
 
@@ -56,7 +60,16 @@ async def run_react_loop(
 
     这一点是刻意的：这个 list 就是 Context 本身。调用方拿到的就是跑完之后的完整历史，
     Phase 4 的 Session 持久化、以及多轮对话的「接着上次聊」，要的正是它。
+
+    on_message 每追加一条消息就回调一次。为什么需要这个口子：循环是**就地修改**
+    messages 的，调用方在循环外面看不到中间追加了什么。没有它就只能等整个任务
+    跑完再一次性落盘 —— 那就丢掉了 JSONL 唯一的优势：进程崩了，已经发生的还在。
     """
+    def record(message: dict) -> None:
+        messages.append(message)
+        if on_message is not None:
+            on_message(message)
+
     for step in range(1, max_steps + 1):
         msg = await llm.chat(messages, tools=tools)
 
@@ -68,7 +81,7 @@ async def run_react_loop(
             logger.info("step %d/%d: 无 tool_calls，输出最终答案", step, max_steps)
             # 最终回答也要进历史。否则「messages 就是完整会话」这个不变量就破了，
             # 多轮对话时下一轮会看不到上一轮回答了什么。
-            messages.append(msg)
+            record(msg)
             return msg.get("content") or ""
 
         logger.info(
@@ -83,7 +96,7 @@ async def run_react_loop(
 
         # assistant 这条必须原样回灌，否则下一步的 tool 消息没有归属的 tool_call_id，
         # API 会直接报 400。
-        messages.append(msg)
+        record(msg)
 
         for tool_call in tool_calls:
             name = tool_call.get("function", {}).get("name")
@@ -95,7 +108,7 @@ async def run_react_loop(
             except Exception as e:  # noqa: BLE001 —— 故意兜住所有工具异常
                 result = f"工具执行出错: {type(e).__name__}: {e}"
 
-            messages.append(
+            record(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call["id"],

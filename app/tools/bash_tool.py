@@ -20,7 +20,7 @@ import sys
 
 from pydantic import BaseModel, Field
 
-from app.tools.base import SandboxedTool, ToolError
+from app.tools.base import SandboxedTool, ToolError, ToolResult
 from app.tools.text import decode_bytes, truncate
 
 MAX_OUTPUT_CHARS = 8000
@@ -152,7 +152,7 @@ class BashTool(SandboxedTool):
     )
     params_model = BashParams
 
-    async def execute(self, command: str, timeout: float) -> str:
+    async def execute(self, command: str, timeout: float) -> ToolResult:
         reason = check_dangerous(command)
         if reason:
             raise ToolError(
@@ -191,4 +191,4 @@ class BashTool(SandboxedTool):
         if len(parts) == 1:
             parts.append("（无输出）")
 
-        return "\n".join(parts)
+        return ToolResult("\n".join(parts))

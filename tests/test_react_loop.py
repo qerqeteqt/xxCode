@@ -166,6 +166,24 @@ def test_raises_max_iteration_error():
     assert len(llm.calls) == 3
 
 
+def test_on_message_每条新增消息都回调一次():
+    """Session 靠这个钩子做 append-only 落盘 —— 回调的内容必须和 messages
+    实际追加的部分完全一致，否则恢复出来的历史会和真实 Context 对不上。"""
+    llm = FakeLLM(
+        [
+            _assistant(tool_calls=[_tool_call("Read")]),
+            _assistant("答案"),
+        ]
+    )
+    seen: list[dict] = []
+    messages = [SYSTEM, USER]
+
+    _run(run_react_loop(messages, llm, FakeTools(), on_message=seen.append))
+
+    assert [m["role"] for m in seen] == ["assistant", "tool", "assistant"]
+    assert seen == messages[2:]
+
+
 def test_tools_schema_is_passed_through():
     """tools schema 原样透传给 LLM —— Phase 2 接入 ToolRegistry 靠的就是这个口子。"""
     schema = [{"type": "function", "function": {"name": "Read"}}]

@@ -152,7 +152,7 @@ def test_返回格式包含类型和步数(tmp_path):
     llm = ScriptedLLM([_assistant("找到三处登录相关代码")])
     tool = SubAgentTool(Sandbox(_make_project(tmp_path)), llm)
 
-    result = _run(tool.execute(agent_type="Explore", task="找登录", context=None))
+    result = _run(tool.execute(agent_type="Explore", task="找登录", context=None)).text
 
     assert result.startswith("[Explore 完成 | 1 步]")
     assert "找到三处登录相关代码" in result
@@ -170,7 +170,7 @@ def test_成功的写入进入改动清单(tmp_path):
 
     result = _run(
         tool.execute(agent_type="General-Purpose", task="建个文件", context=None)
-    )
+    ).text
 
     assert "修改: new.py" in result
     assert (project / "new.py").exists()
@@ -200,7 +200,7 @@ def test_失败的写入不进改动清单(tmp_path):
 
     result = _run(
         tool.execute(agent_type="General-Purpose", task="改点东西", context=None)
-    )
+    ).text
 
     assert "未修改任何文件" in result
     assert (project / "app" / "main.py").read_text(encoding="utf-8") == (
@@ -214,7 +214,7 @@ def test_没改文件的_general_purpose_明确标注(tmp_path):
 
     result = _run(
         tool.execute(agent_type="General-Purpose", task="看看", context=None)
-    )
+    ).text
 
     assert "未修改任何文件" in result
 
@@ -242,7 +242,7 @@ def test_超步数时把中间结论带回来(tmp_path, monkeypatch):
     )
     tool = SubAgentTool(Sandbox(_make_project(tmp_path)), llm)
 
-    result = _run(tool.execute(agent_type="Explore", task="看看项目", context=None))
+    result = _run(tool.execute(agent_type="Explore", task="看看项目", context=None)).text
 
     assert "未完成" in result
     assert "2 步上限" in result
@@ -263,6 +263,6 @@ def test_超步数且无中间结论时如实说明(tmp_path, monkeypatch):
     llm = ScriptedLLM([_assistant(tool_calls=[_tool_call("List", {"path": "."})])])
     tool = SubAgentTool(Sandbox(_make_project(tmp_path)), llm)
 
-    result = _run(tool.execute(agent_type="Explore", task="看看", context=None))
+    result = _run(tool.execute(agent_type="Explore", task="看看", context=None)).text
 
     assert "没有任何中间结论" in result

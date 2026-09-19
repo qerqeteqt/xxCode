@@ -23,7 +23,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.tools.base import SandboxedTool, ToolError
+from app.tools.base import SandboxedTool, ToolError, ToolResult
 
 MAX_GLOB_RESULTS = 200
 MAX_GREP_MATCHES = 200
@@ -60,7 +60,7 @@ class GlobTool(SandboxedTool):
     )
     params_model = GlobParams
 
-    async def execute(self, pattern: str, path: str) -> str:
+    async def execute(self, pattern: str, path: str) -> ToolResult:
         base = self.sandbox.resolve(path)
         if not base.exists():
             raise ToolError(f"目录不存在: {self.sandbox.rel(base)}")
@@ -75,7 +75,7 @@ class GlobTool(SandboxedTool):
                 hits.append(self.sandbox.rel(file_path))
 
         if not hits:
-            return f"没有文件匹配 {pattern!r}"
+            return ToolResult(f"没有文件匹配 {pattern!r}")
 
         hits.sort()
         truncated = len(hits) > MAX_GLOB_RESULTS
@@ -83,7 +83,7 @@ class GlobTool(SandboxedTool):
         body = "\n".join(shown)
         if truncated:
             body += f"\n…（共 {len(hits)} 个匹配，只显示前 {MAX_GLOB_RESULTS} 个，请用更精确的 pattern 收窄）"
-        return body
+        return ToolResult(body)
 
 
 class GrepParams(BaseModel):
@@ -104,7 +104,7 @@ class GrepTool(SandboxedTool):
     )
     params_model = GrepParams
 
-    async def execute(self, pattern: str, path: str, include: str | None) -> str:
+    async def execute(self, pattern: str, path: str, include: str | None) -> ToolResult:
         try:
             regex = re.compile(pattern)
         except re.error as e:
@@ -149,10 +149,14 @@ class GrepTool(SandboxedTool):
                 break
 
         if not matches:
-            note = f"（跳过了 {binary_skipped} 个二进制/非 UTF-8 文件）" if binary_skipped else ""
-            return f"没有匹配 {pattern!r} 的内容{note}"
+            note = (
+                f"（跳过了 {binary_skipped} 个二进制/非 UTF-8 文件）"
+                if binary_skipped
+                else ""
+            )
+            return ToolResult(f"没有匹配 {pattern!r} 的内容{note}")
 
         body = "\n".join(matches)
         if truncated:
             body += f"\n…（匹配过多，只显示前 {MAX_GREP_MATCHES} 条，请用更精确的 pattern）"
-        return body
+        return ToolResult(body)

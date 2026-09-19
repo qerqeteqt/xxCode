@@ -362,3 +362,56 @@ def test_超长标题被截断(tmp_path):
     session.finish("finished")
 
     assert len(SessionStore(tmp_path).list_sessions()[0].title) == 120
+
+
+# ================================================================ 删除
+
+
+def test_删除会话(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create()
+    session.append_message({"role": "user", "content": "问"})
+
+    assert session.path.exists()
+    store.delete(session.session_id)
+
+    assert not session.path.exists()
+    assert store.list_sessions() == []
+
+
+def test_删除也认前缀(tmp_path):
+    """删除尤其不能猜 —— 猜错就是删掉了另一条对话。"""
+    store = SessionStore(tmp_path)
+    session = store.create()
+
+    store.delete(session.session_id[-4:])
+
+    assert not session.path.exists()
+
+
+def test_前缀撞多个时拒绝删除(tmp_path):
+    store = SessionStore(tmp_path)
+    first = store.create()
+    store.create()
+
+    with pytest.raises(SessionError, match="匹配到"):
+        store.delete("2")  # 两条都以 2 开头
+
+    assert first.path.exists()  # 一条都没被删
+
+
+def test_删不存在的会话报错(tmp_path):
+    with pytest.raises(SessionError, match="找不到会话"):
+        SessionStore(tmp_path).delete("不存在")
+
+
+def test_删完最后一条会清掉空的日期目录(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create()
+    day_dir = session.path.parent
+    assert day_dir.is_dir()
+
+    store.delete(session.session_id)
+
+    assert not day_dir.exists()
+    assert store.base_dir.exists()  # 外层目录留着，下次还要用

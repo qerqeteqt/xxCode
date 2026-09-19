@@ -384,6 +384,24 @@ class SessionStore:
 
         return Session(self, path.stem, path, state)
 
+    def delete(self, session_id_or_prefix: str) -> Path:
+        """删掉一个会话文件，返回被删的路径。
+
+        复用 find()，所以「前后缀都认」和「撞多个就报错」的规则一样适用。
+        删除尤其不能猜 —— 猜错就是删掉了另一条对话。
+
+        日期目录空了就顺手删掉，不然 `ls .agent/sessions/` 会攒一堆空目录。
+        """
+        path = self.find(session_id_or_prefix)
+        path.unlink()
+
+        day_dir = path.parent
+        if day_dir != self.base_dir and not any(day_dir.iterdir()):
+            day_dir.rmdir()
+            logger.info("删掉空的日期目录 %s", day_dir.name)
+
+        return path
+
     def session_at(self, path: Path) -> Session:
         """按路径打开会话（同样做 root 校验）。AutoDream 遍历历史会话时用这个。"""
         return self._open(path)

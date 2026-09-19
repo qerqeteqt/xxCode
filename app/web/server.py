@@ -297,6 +297,26 @@ def create_app(root: str | Path) -> FastAPI:
         logger.info("新会话 %s", session.session_id)
         return {"session_id": session.session_id}
 
+    @app.delete("/api/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict:
+        live = live_sessions.get(session_id)
+        if live is not None and live.busy:
+            # 正在跑的时候删掉文件，等于把 append-only 的日志从底下抽走 ——
+            # 后面每次写入都会失败，模型也拿不到结果。让它跑完再删
+            raise HTTPException(409, "这个会话正在跑，等它结束再删")
+
+        if live is not None:
+            await live.close()
+            live_sessions.pop(session_id, None)
+
+        try:
+            store.delete(session_id)
+        except SessionError as e:
+            raise HTTPException(404, str(e)) from e
+
+        logger.info("已删除会话 %s", session_id)
+        return {"ok": True}
+
     @app.get("/api/sessions/{session_id}/messages")
     async def session_messages(session_id: str) -> list[dict]:
         """恢复会话时把历史消息还给前端。

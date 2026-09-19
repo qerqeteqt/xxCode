@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from app.agent.react_loop import run_react_loop
 from app.events import Event, emit, tag_events  # noqa: F401  (tag_events 由子 Agent 用)
+from app.memory.session_store import SessionStore
 from app.tools import build_default_registry
 from app.web.server import apply_settings, update_env
 
@@ -226,3 +227,70 @@ def test_没有钩子时盖戳不报错():
 
 async def _never(tool_call: dict) -> str:
     raise AssertionError("这个用例不该调用工具")
+
+
+# ================================================================ 会话接口
+
+
+@pytest.fixture
+def client(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.web.server import create_app
+
+    session = SessionStore(tmp_path).create()
+    session.append_message({"role": "user", "content": "第一条提问"})
+    session.append_message({"role": "assistant", "content": "回答"})
+    session.finish("finished")
+    return TestClient(create_app(tmp_path)), session
+
+
+def test_列表带出标题(client):
+    c, session = client
+    rows = c.get("/api/sessions").json()
+
+    assert len(rows) == 1
+    assert rows[0]["title"] == "第一条提问"
+    assert rows[0]["session_id"] == session.session_id
+
+
+def test_空会话不列出来(client, tmp_path):
+    """点了「新会话」但没提问会留下一条空记录 —— 那是占位，不是历史。"""
+    c, _ = client
+    SessionStore(tmp_path).create()  # 空的
+
+    assert len(c.get("/api/sessions").json()) == 1  # 还是只有那条说过话的
+
+
+def test_删除会话(client):
+    c, session = client
+
+    assert c.delete(f"/api/sessions/{session.session_id}").status_code == 200
+    assert c.get("/api/sessions").json() == []
+    assert not session.path.exists()
+
+
+def test_删除不存在的会话返回_404(client):
+    c, _ = client
+
+    assert c.delete("/api/sessions/不存在的东西").status_code == 404
+
+
+def test_会话消息能读回来(client):
+    c, session = client
+    msgs = c.get(f"/api/sessions/{session.session_id}/messages").json()
+
+    assert msgs == [
+        {"role": "user", "text": "第一条提问"},
+        {"role": "assistant", "text": "回答"},
+    ]
+
+
+def test_设置接口拒绝白名单之外的键(client):
+    """`.env` 里还有 API Key，绝不能让网页随便写。"""
+    c, _ = client
+
+    resp = c.post("/api/config", json={"values": {"LLM_API_KEY": "偷改"}})
+
+    assert resp.status_code == 400
+    assert "不可修改" in resp.json()["detail"]

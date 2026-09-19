@@ -92,21 +92,49 @@
     color: var(--dim); font-size: 11px; padding: 10px 8px 4px;
     position: sticky; top: 0; background: var(--panel);
   }
+  /* 一条会话就一行。多余的细节塞进 title 属性，鼠标悬停才看。
+     用 div 而不是 button —— 里面还要放一个「⋯」按钮，button 不能嵌 button */
   .conv {
-    display: block; width: 100%; text-align: left; border: 1px solid transparent;
-    background: none; border-radius: 6px; padding: 7px 9px; cursor: pointer;
+    position: relative; display: block; width: 100%; text-align: left;
+    border: 1px solid transparent; background: none; border-radius: 6px;
+    /* 右边留 30px 给「⋯」，不留的话长标题会被它盖住 */
+    padding: 7px 30px 7px 9px; cursor: pointer;
     color: var(--text); font-size: 13px; line-height: 1.4; margin-bottom: 1px;
     font-family: inherit;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .conv:hover { background: var(--hover); border-color: transparent; }
   .conv.active {
     background: var(--grad-active); border-color: transparent;
     box-shadow: inset 2px 0 0 var(--accent);
   }
-  /* 一条会话就一行。多余的细节塞进 title 属性，鼠标悬停才看 */
-  .conv {
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .conv .more {
+    position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+    padding: 0 6px; font-size: 15px; line-height: 1.5;
+    border: none; background: none; color: var(--dim); border-radius: 4px;
+    opacity: 0; transition: opacity .1s;
   }
+  /* 平时藏起来，鼠标移到这条上、或菜单开着时才显示 */
+  .conv:hover .more, .conv .more.on { opacity: 1; }
+  .conv .more:hover { background: var(--raised); color: var(--text); }
+
+  /* 菜单挂到 body 上、用 fixed 定位 —— 放列表里面会被 overflow 裁掉 */
+  .menu {
+    position: fixed; z-index: 40; min-width: 148px;
+    background: var(--raised); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px;
+    box-shadow: 0 10px 30px -8px rgba(0,0,0,.55);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .menu button {
+    border: none; background: none; text-align: left; width: 100%;
+    padding: 7px 10px; border-radius: 5px; font-size: 13px; color: var(--text);
+  }
+  .menu button:hover:not(:disabled) { background: var(--hover); border-color: transparent; }
+  .menu button.danger { color: var(--err); }
+  .menu .ask { padding: 7px 10px 4px; color: var(--dim); font-size: 12px; }
+  .menu .row { display: flex; gap: 4px; padding: 0 4px 2px; }
+  .menu .row button { flex: 1; text-align: center; }
   .sidebar .foot {
     border-top: 1px solid var(--border); padding: 8px;
     display: flex; gap: 6px; align-items: center;
@@ -476,20 +504,29 @@ function renderSidebar() {
       lastDay = day;
     }
 
-    const btn = el("button", "conv" + (s.session_id === state.sessionId ? " active" : ""));
+    const row = el("div", "conv" + (s.session_id === state.sessionId ? " active" : ""));
     // 就显示第一句提问。条数 / tokens / 时间放进 title，悬停才看 ——
     // 列表是用来「认出是哪次对话」的，不是用来读统计的
-    btn.textContent = s.title;
-    btn.title = s.title + "\n" + s.started_at.replace("T", " ") +
+    row.append(el("span", "title", s.title));
+    row.title = s.title + "\n" + s.started_at.replace("T", " ") +
                 ` · ${s.message_count} 条` +
                 (s.total_tokens ? ` · ${humanTokens(s.total_tokens)} tokens` : "");
 
-    btn.onclick = () => {
+    // 「⋯」平时藏着，鼠标移到这条上才出现
+    const more = el("button", "more", "⋯");
+    more.title = "更多";
+    more.onclick = (e) => {
+      e.stopPropagation();   // 别让点击穿透到「切换会话」上去
+      openConvMenu(more, s);
+    };
+    row.append(more);
+
+    row.onclick = () => {
       if (state.busy) return toast("正在跑，等它结束再切");
       $("sidebar").classList.remove("open");
       switchTo(s.session_id);
     };
-    list.append(btn);
+    list.append(row);
   }
 }
 
@@ -526,13 +563,99 @@ async function switchTo(sessionId) {
   refreshConfig();
 }
 
+// ---------------------------------------------------------------- 会话菜单
+
+let openMenuEl = null;
+
+function closeMenu() {
+  if (!openMenuEl) return;
+  openMenuEl.remove();
+  openMenuEl = null;
+  document.querySelectorAll(".conv .more.on").forEach((b) => b.classList.remove("on"));
+}
+
+/** 菜单挂在 body 上、用 fixed 定位。放列表里会被 overflow 裁掉 —— 尤其是最后一条。 */
+function openMenu(anchor, build) {
+  closeMenu();
+  const menu = el("div", "menu");
+  build(menu);
+  document.body.append(menu);
+
+  const r = anchor.getBoundingClientRect();
+  // 贴着「⋯」右侧展开；快出界就翻到左边 / 往上收
+  menu.style.left = Math.max(8, Math.min(r.right + 6, window.innerWidth - menu.offsetWidth - 8)) + "px";
+  menu.style.top = Math.max(8, Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8)) + "px";
+
+  openMenuEl = menu;
+  anchor.classList.add("on");
+  return menu;
+}
+
+function openConvMenu(anchor, session) {
+  openMenu(anchor, (menu) => {
+    const del = el("button", "danger", "删除会话");
+    del.onclick = (e) => { e.stopPropagation(); askDelete(menu, session); };
+    menu.append(del);
+  });
+}
+
+function askDelete(menu, session) {
+  // 二次确认直接在菜单里换内容。删对话不可逆，而且列表里几条标题长得很像，
+  // 点错太正常了 —— 用系统 confirm() 也行，但那个框太丑且拦不住误点
+  menu.innerHTML = "";
+  menu.append(el("div", "ask", "删除这条对话？不可恢复。"));
+  const row = el("div", "row");
+  const yes = el("button", "danger", "删除");
+  const no = el("button", null, "取消");
+  yes.onclick = (e) => { e.stopPropagation(); closeMenu(); doDelete(session); };
+  no.onclick = (e) => { e.stopPropagation(); closeMenu(); };
+  row.append(yes, no);
+  menu.append(row);
+}
+
+async function doDelete(session) {
+  try {
+    const resp = await fetch(`/api/sessions/${session.session_id}`, { method: "DELETE" });
+    if (!resp.ok) {
+      toast("删除失败：" + ((await resp.json()).detail || resp.statusText));
+      return;
+    }
+  } catch (e) {
+    toast("删除失败：" + e.message);
+    return;
+  }
+
+  const wasActive = session.session_id === state.sessionId;
+  if (wasActive) state.sessionId = null;
+  await loadSessions();
+
+  // 删掉的正是在看的那条：切到列表里最近的一条，没有就开个新的
+  if (wasActive) {
+    if (state.sessions.length) await switchTo(state.sessions[0].session_id);
+    else await newChat();
+  }
+  toast("已删除");
+}
+
+// 点别处 / 按 Esc 就收起菜单
+document.addEventListener("click", (e) => {
+  if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeMenu();
+});
+
 $("newChat").onclick = async () => {
   if (state.busy) return toast("正在跑，等它结束");
+  await newChat();
+};
+
+async function newChat() {
   const { session_id } = await (await fetch("/api/sessions", { method: "POST" })).json();
   state.sessions = [];           // 强制重新拉，新会话才会出现在列表里
   await loadSessions();
   await switchTo(session_id);
-};
+}
 
 $("toggleSide").onclick = () => $("sidebar").classList.toggle("open");
 

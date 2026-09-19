@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.react_loop import MaxIterationError, run_react_loop
 from app.agent.subagent import AGENT_SPECS, AgentSpec, AgentType
-from app.llm.client import LLMClient, LLMError
+from app.llm.client import LLMClient, LLMError, TokenUsage, human_tokens
 from app.tools.base import SandboxedTool, ToolError, ToolResult
 from app.tools.bash_tool import BashTool
 from app.tools.file_tool import EditTool, ListTool, ReadTool, WriteTool
@@ -79,6 +79,16 @@ class _CountingLLM:
     async def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:
         self.calls += 1
         return await self._inner.chat(messages, tools=tools)
+
+
+def _snapshot_usage(llm: object) -> TokenUsage:
+    """取一次当前用量。
+
+    用 getattr 而不是直接取属性：测试里的假 LLM 没有 usage，那就当作 0。
+    SubAgent 的开销本来就想让它可见，所以这里取不到也不该报错。
+    """
+    usage = getattr(llm, "usage", None)
+    return usage if isinstance(usage, TokenUsage) else TokenUsage()
 
 
 def _compose_task(task: str, context: str | None) -> str:
@@ -162,6 +172,9 @@ class SubAgentTool(SandboxedTool):
             registry.register(tool)
 
         counting_llm = _CountingLLM(self._llm)
+        # 取差值来算「这一趟花了多少」—— SubAgent 的开销在 Main 眼里原本是完全
+        # 隐形的：Main 只走了 1 步，背后这个 SubAgent 可能调了 7 次 LLM
+        usage_before = _snapshot_usage(self._llm)
 
         logger.info(
             "[subagent] %s 启动 | 工具: %s",
@@ -198,15 +211,23 @@ class SubAgentTool(SandboxedTool):
         # 在 Python 里是默认行为，不需要额外代码。真正要防的是相反的事：
         # 别把它挂到 self 上做缓存，那就再也释放不掉了。
 
+        usage = _snapshot_usage(self._llm) - usage_before
         return ToolResult(
-            self._format_result(agent_type, counting_llm.calls, registry, answer)
+            self._format_result(agent_type, counting_llm.calls, usage, registry, answer)
         )
 
     @staticmethod
     def _format_result(
-        agent_type: str, steps: int, registry: TrackingRegistry, answer: str
+        agent_type: str,
+        steps: int,
+        usage: TokenUsage,
+        registry: TrackingRegistry,
+        answer: str,
     ) -> str:
         header = [f"{agent_type} 完成", f"{steps} 步"]
+        # 没有用量（比如测试里的假 LLM）就不显示，免得头部多一段 0 tokens 的噪声
+        if usage.calls:
+            header.append(f"{human_tokens(usage.total_tokens)} tokens")
         if registry.changed_files:
             header.append("修改: " + ", ".join(registry.changed_files))
         elif agent_type == "General-Purpose":

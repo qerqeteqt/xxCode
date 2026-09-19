@@ -138,8 +138,53 @@ def test_未结束的会话状态是_running(tmp_path):
 
 
 def test_SessionState_可以往返序列化():
-    state = SessionState(session_id="s1", status="finished", files_changed=["a.py"])
+    state = SessionState(
+        session_id="s1",
+        status="finished",
+        files_changed=["a.py"],
+        prompt_tokens=1200,
+        completion_tokens=340,
+        llm_calls=7,
+    )
     assert SessionState.from_dict(state.to_dict()) == state
+
+
+def test_记录_token_用量(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create()
+    session.record_usage(prompt_tokens=1200, completion_tokens=340, calls=7)
+    session.finish("finished")
+
+    resumed = store.load(session.session_id)
+    assert resumed.state.prompt_tokens == 1200
+    assert resumed.state.completion_tokens == 340
+    assert resumed.state.total_tokens == 1540
+    assert resumed.state.llm_calls == 7
+
+
+def test_旧会话没有_token_字段也不炸(tmp_path):
+    """Phase 7 之前写的会话文件里没有这几个字段，读回来该当 0 而不是 KeyError。"""
+    session = SessionStore(tmp_path).create()
+    session.finish("finished")
+
+    text = session.path.read_text(encoding="utf-8")
+    stripped = "\n".join(
+        line
+        for line in text.splitlines()
+        if '"prompt_tokens"' not in line
+    )
+    session.path.write_text(stripped + "\n", encoding="utf-8")
+
+    assert SessionStore(tmp_path).load(session.session_id).state.total_tokens == 0
+
+
+def test_list_sessions_带出_token_用量(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create()
+    session.record_usage(1000, 200, 3)
+    session.finish("finished")
+
+    assert store.list_sessions()[0].total_tokens == 1200
 
 
 # ================================================================ 查找与恢复

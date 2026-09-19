@@ -158,6 +158,41 @@ def test_返回格式包含类型和步数(tmp_path):
     assert "找到三处登录相关代码" in result
 
 
+def test_头部带上_token_开销(tmp_path):
+    """SubAgent 的开销在 Main 眼里原本完全隐形：Main 只走 1 步，
+    背后这个子 Agent 可能调了 7 次 LLM。"""
+    from app.llm.client import TokenUsage
+
+    class UsageLLM(ScriptedLLM):
+        """像真 client 一样在调用过程中累加用量 —— SubAgentTool 取的是前后差值。"""
+
+        def __init__(self, replies, per_call):
+            super().__init__(replies)
+            self.usage = TokenUsage()
+            self._per_call = per_call
+
+        async def chat(self, messages, tools=None):
+            result = await super().chat(messages, tools)
+            self.usage = self.usage + self._per_call
+            return result
+
+    llm = UsageLLM([_assistant("查完了")], TokenUsage(15_000, 3_200, 1))
+    tool = SubAgentTool(Sandbox(_make_project(tmp_path)), llm)
+
+    result = _run(tool.execute(agent_type="Explore", task="看看", context=None)).text
+
+    assert "18.2k tokens" in result
+
+
+def test_假_LLM_没有用量时不显示_tokens(tmp_path):
+    llm = ScriptedLLM([_assistant("查完了")])
+    tool = SubAgentTool(Sandbox(_make_project(tmp_path)), llm)
+
+    result = _run(tool.execute(agent_type="Explore", task="看看", context=None)).text
+
+    assert "tokens" not in result
+
+
 def test_成功的写入进入改动清单(tmp_path):
     project = _make_project(tmp_path)
     llm = ScriptedLLM(

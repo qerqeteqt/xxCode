@@ -202,7 +202,14 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
 - [x] Phase 4 — State → JSONL Session Store
 - [x] Phase 5 — MemoryManager → MEMORY.md → Markdown Memory
 - [x] Phase 6 — Scheduler → AutoDream → Memory Consolidation
-- [ ] Phase 7 — Retry / Logging / Async / Parallel SubAgent / Permission / Streaming …
+- [ ] Phase 7 — 完善（文档把它写成一个大清单，但一次做完就违反「不一次性实现全部模块」的原则，所以拆开推）
+  - [x] 7a — Retry + Token Management
+  - [ ] 7b — Context Compaction
+  - [ ] 7c — Permission
+  - [ ] 7d — Parallel SubAgent / Streaming / Web UI
+
+Logging 与 Async 在前六个阶段已经顺手做掉了：每个模块一个 logger；从 Phase 1 起就是
+async 的，遗留只是搜索时的同步文件 IO 会短暂阻塞事件循环（当前规模无感）。
 
 ## 环境准备
 
@@ -242,6 +249,28 @@ JSON、参数不符合 schema、工具自身执行失败，四种情况都会转
 
 Bash 的安全档位目前是「危险命令黑名单」，挡的是**误伤而非攻击者**；
 完整的权限系统（可配置策略 / 人工确认 / 容器隔离）属于 Phase 7。
+
+## 韧性与成本
+
+**重试**：`LLMClient` 对「等一会儿再来就好」的失败自动重试 —— 网络超时、429、5xx。
+4xx（429 除外）**不重试**，因为它说明请求本身有问题（key 不对、模型名写错、参数非法），
+重试只会把一个明确的配置错误变成一个要等半分钟的谜题。
+
+最多 3 次，指数退避 + 抖动（1s → 2s → 4s），并尊重服务端的 `Retry-After`（封顶 30 秒）。
+抖动不是装饰：同时跑多个 SubAgent 时它们会同时失败、同时重试，没有随机量就是一批一批
+地一起撞上去。
+
+**Token 用量**：每次调用的 `usage` 会累加到 `LLMClient.usage`，会话结束时写进
+`SessionState`（`--list-sessions` 能看到）。失败重试的那些不计入 —— 没拿到 usage。
+
+SubAgent 的返回值会带上自己的开销：
+
+```
+[Explore 完成 | 4 步 | 6.4k tokens]
+```
+
+这一项不是锦上添花。实测一次会话总量 11.2k tokens，其中 **6.4k 花在那个子 Agent 身上**，
+而 Main Agent 的视角里它只占 1 步 —— 没有这个数字，你完全看不出钱花在哪了。
 
 ## 运行
 

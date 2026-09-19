@@ -76,6 +76,15 @@ class SessionState:
     files_changed: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    # token 用量。记 calls 是因为「花了多少钱」和「走了多少步」是两个问题，
+    # 而 SubAgent 的开销之所以隐形，正是因为只看步数看不出钱
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    llm_calls: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +93,9 @@ class SessionState:
             "files_changed": list(self.files_changed),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "llm_calls": self.llm_calls,
         }
 
     @classmethod
@@ -94,6 +106,9 @@ class SessionState:
             files_changed=list(data.get("files_changed") or []),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            prompt_tokens=int(data.get("prompt_tokens") or 0),
+            completion_tokens=int(data.get("completion_tokens") or 0),
+            llm_calls=int(data.get("llm_calls") or 0),
         )
 
 
@@ -107,6 +122,7 @@ class SessionInfo:
     status: str
     message_count: int
     files_changed: list[str]
+    total_tokens: int = 0
 
 
 def read_records(path: Path) -> list[dict]:
@@ -171,6 +187,18 @@ class Session:
         self.state.updated_at = _now()
         self._append({"type": "state", "state": self.state.to_dict()})
 
+    def record_usage(self, prompt_tokens: int, completion_tokens: int, calls: int) -> None:
+        """记下这个会话的 token 用量（在会话结束时调用一次）。
+
+        用一组整数而不是直接收 LLMClient 的 TokenUsage 对象：Session 是存储层，
+        不该知道 LLM 客户端的类型长什么样。
+        """
+        self.state.prompt_tokens = prompt_tokens
+        self.state.completion_tokens = completion_tokens
+        self.state.llm_calls = calls
+        self.state.updated_at = _now()
+        self._append({"type": "state", "state": self.state.to_dict()})
+
     def finish(self, status: str) -> None:
         self.state.status = status
         self.state.updated_at = _now()
@@ -212,6 +240,7 @@ class Session:
             status=status,
             message_count=sum(1 for r in records if r.get("type") == "message"),
             files_changed=list(self.state.files_changed),
+            total_tokens=self.state.total_tokens,
         )
 
 

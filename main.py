@@ -23,7 +23,7 @@ from pathlib import Path
 
 from app.agent.main_agent import MainAgent
 from app.agent.react_loop import MaxIterationError
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, human_tokens
 from app.memory import MemoryManager
 from app.memory.session_store import SessionError, SessionStore
 from app.scheduler import Scheduler
@@ -79,11 +79,18 @@ async def _run_session(
             max_steps=settings.max_steps,
         )
 
+        def _record_usage() -> None:
+            # 不管成没成，token 都已经花出去了，如实记下 —— 失败的那次尤其要看
+            session.record_usage(
+                llm.usage.prompt_tokens, llm.usage.completion_tokens, llm.usage.calls
+            )
+
         try:
             answer = await agent.run(question)
         except MaxIterationError as e:
             # 达到步数上限：过程已经逐条落盘了（on_message 钩子），
             # 所以这里能告诉用户「去哪接着聊」，而不是让他从头再来一遍
+            _record_usage()
             session.finish("failed")
             raise MaxIterationError(
                 f"{e}。本次过程已保存在会话 {session.session_id}，"
@@ -92,9 +99,12 @@ async def _run_session(
         except BaseException:
             # 包括 Ctrl+C 和 LLM 报错。会话文件里要留下「这次没跑完」的痕迹，
             # 否则下次 --continue 会以为上次是正常结束的
+            _record_usage()
             session.finish("failed")
             raise
 
+        _record_usage()
+        logger.info("本次会话用量: %s", llm.usage)
         session.finish("finished")
         return answer
 
@@ -127,10 +137,11 @@ def _print_sessions(root: Path, limit: int) -> None:
         print(f"{root} 下还没有任何会话记录。")
         return
     for info in infos:
+        tokens = f"  {human_tokens(info.total_tokens)} tokens" if info.total_tokens else ""
         changed = f"  改动 {len(info.files_changed)} 个文件" if info.files_changed else ""
         print(
             f"{info.started_at}  {info.session_id}  "
-            f"[{info.status}]  {info.message_count} 条消息{changed}"
+            f"[{info.status}]  {info.message_count} 条消息{tokens}{changed}"
         )
 
 

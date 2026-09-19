@@ -31,3 +31,10 @@ env/
 .agent/consolidation.json
 .agent/memory-backups/
 # 注意：.agent/memory/ 下的 Markdown 是长期知识，需要入库，故不在此忽略
+
+# ---- 一次性的实验产物 ----
+# 贪吃蛇是拿这个 agent 跑出来的东西，不是这个项目的代码。
+# 留在磁盘上自己玩，但不入库 —— 它混在 tests/ 里会被 pytest 当测试收集，
+# 语义上不对。真要长期留，应该挪到 examples/ 之类的地方。
+tests/snake.py
+tests/test_snake.py

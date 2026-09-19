@@ -65,11 +65,10 @@
   }
   .conv:hover { background: var(--hover); border-color: transparent; }
   .conv.active { background: var(--accent-soft); border-color: var(--accent); }
-  .conv .title {
-    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* 一条会话就一行。多余的细节塞进 title 属性，鼠标悬停才看 */
+  .conv {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .conv .sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
-  .conv .title.empty { color: var(--dim); font-style: italic; }
   .sidebar .foot {
     border-top: 1px solid var(--border); padding: 8px;
     display: flex; gap: 6px; align-items: center;
@@ -349,12 +348,13 @@ function renderSidebar() {
   const list = $("convList");
   list.innerHTML = "";
   if (state.sessions.length === 0) {
-    list.append(el("div", "day", "还没有会话"));
+    list.append(el("div", "day", "还没有对话"));
     return;
   }
 
   let lastDay = null;
-  for (const s of state.sessions) {
+  // 服务端已经滤过空会话，这里再挡一道 —— 万一连的是没更新的服务进程
+  for (const s of state.sessions.filter((x) => x.message_count > 0)) {
     const day = dayLabel(s.started_at);
     if (day !== lastDay) {
       list.append(el("div", "day", day));
@@ -362,17 +362,12 @@ function renderSidebar() {
     }
 
     const btn = el("button", "conv" + (s.session_id === state.sessionId ? " active" : ""));
-    const title = el("span", "title" + (s.title ? "" : " empty"),
-                     s.title || "（还没提问）");
-    title.title = s.title || s.session_id;
-    btn.append(title);
-
-    const bits = [];
-    if (s.message_count) bits.push(`${s.message_count} 条`);
-    if (s.total_tokens) bits.push(humanTokens(s.total_tokens) + " tokens");
-    if (s.status === "failed") bits.push("未完成");
-    bits.push(s.started_at.slice(11, 16));
-    btn.append(el("span", "sub", bits.join(" · ")));
+    // 就显示第一句提问。条数 / tokens / 时间放进 title，悬停才看 ——
+    // 列表是用来「认出是哪次对话」的，不是用来读统计的
+    btn.textContent = s.title;
+    btn.title = s.title + "\n" + s.started_at.replace("T", " ") +
+                ` · ${s.message_count} 条` +
+                (s.total_tokens ? ` · ${humanTokens(s.total_tokens)} tokens` : "");
 
     btn.onclick = () => {
       if (state.busy) return toast("正在跑，等它结束再切");

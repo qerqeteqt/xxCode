@@ -62,13 +62,35 @@ def test_没有会话时不整理(tmp_path):
     assert "还没有任何会话" in decision.reason
 
 
-def test_从未整理过但有会话时要整理(tmp_path):
+def test_新项目用首会话时间当基线(tmp_path):
+    """空项目里有会话了 —— 但基线是**最早那个会话的时间**，不是「立刻放行」。
+    否则「24 小时 且 5 个会话」这套保守阈值等于被绕过。"""
     _make_session(tmp_path)
 
     decision = Scheduler(tmp_path).check()
 
+    assert decision.should_run is False
+    assert "项目首次使用" in decision.reason
+
+
+def test_新项目攒够时间和会话数也会跑(tmp_path):
+    for i in range(5):
+        _make_session(tmp_path, question=f"问题{i}", age_hours=30)
+
+    decision = Scheduler(tmp_path).check()
+
     assert decision.should_run is True
-    assert "从未整理过" in decision.reason
+    assert "项目首次使用" in decision.reason
+
+
+def test_新项目时间够但会话不够不跑(tmp_path):
+    for i in range(3):
+        _make_session(tmp_path, question=f"问题{i}", age_hours=30)
+
+    decision = Scheduler(tmp_path).check()
+
+    assert decision.should_run is False
+    assert "新增 3 个会话" in decision.reason
 
 
 def test_两个条件都满足才跑(tmp_path):
@@ -121,16 +143,19 @@ def test_阈值可调(tmp_path):
     assert Scheduler(tmp_path, min_hours=0, min_sessions=1).check().should_run is True
 
 
-def test_状态文件坏掉时当作从未整理过(tmp_path):
-    _make_session(tmp_path)
+def test_状态文件坏掉时退回首会话基线(tmp_path):
+    """坏的只是「上次什么时候跑的」，不是「项目什么时候开始用的」。
+    退回用首会话时间当基线，总比因为一个坏文件就永远不整理强。"""
+    for i in range(5):
+        _make_session(tmp_path, question=f"问题{i}", age_hours=30)
     path = tmp_path / ".agent" / "consolidation.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{不是 json", encoding="utf-8")
 
     decision = Scheduler(tmp_path).check()
 
-    # 大不了多整理一次，总比因为一个坏文件再也整理不了强
     assert decision.should_run is True
+    assert "项目首次使用" in decision.reason
 
 
 # ================================================================ 执行与安全网
@@ -160,7 +185,7 @@ def test_强制整理跳过条件判断(tmp_path):
 
 def test_整理成功后更新状态文件(tmp_path):
     _make_session(tmp_path)
-    _run(Scheduler(tmp_path).consolidate(FakeLLM()))
+    _run(Scheduler(tmp_path).consolidate(FakeLLM(), force=True))
 
     state = json.loads((tmp_path / ".agent" / "consolidation.json").read_text("utf-8"))
     assert "last_run" in state
@@ -173,7 +198,7 @@ def test_整理前自动备份记忆(tmp_path):
     memory.write_memory("arch", "重要内容", name="架构")
     _make_session(tmp_path)
 
-    _run(Scheduler(tmp_path).consolidate(FakeLLM()))
+    _run(Scheduler(tmp_path).consolidate(FakeLLM(), force=True))
 
     backups = list((tmp_path / ".agent" / "memory-backups").glob("*"))
     assert len(backups) == 1
@@ -223,7 +248,7 @@ def test_整理没跑完不更新状态(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.memory.auto_dream.AutoDream.run", _failed)
 
-    result = _run(scheduler.consolidate(FakeLLM()))
+    result = _run(scheduler.consolidate(FakeLLM(), force=True))
 
     assert result.completed is False
     assert not (tmp_path / ".agent" / "consolidation.json").exists()

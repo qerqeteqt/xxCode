@@ -46,6 +46,20 @@ class ConsolidationDecision:
     reason: str  # 给日志用：为什么跑 / 为什么不跑
 
 
+@dataclass(frozen=True)
+class _Baseline:
+    """计算「距上次整理多久」的起点。
+
+    is_first_time 为 True 表示还没整理过，起点取的是**最早那个会话的时间** ——
+    也就是这个项目第一次被使用的时刻。为什么不直接放行：阈值设成「24 小时 **且**
+    5 个会话」，意图就是尽量少跑（整理要花真金白银）。新项目一上来就跑一次，
+    等于绕过了这个意图。
+    """
+
+    when: datetime
+    is_first_time: bool
+
+
 class Scheduler:
     def __init__(
         self,
@@ -83,38 +97,50 @@ class Scheduler:
 
     # ------------------------------------------------------------ 判断
 
-    def new_sessions(self) -> list[Path]:
-        """上次整理之后新产生的会话，新的在前。
-
-        一个会话的「产生时间」用文件 mtime —— Session 是 append-only 的，
-        所以 mtime 就是它最后一次活动的时间，也正是我们想比的。
-        """
+    def _baseline(self) -> _Baseline | None:
         last_run = self._last_run()
-        cutoff = last_run.timestamp() if last_run else 0.0
+        if last_run is not None:
+            return _Baseline(last_run, is_first_time=False)
+
+        files = self.store.session_files()
+        if not files:
+            return None
+        # 一个会话的「时间」用文件 mtime —— Session 是 append-only 的，
+        # mtime 就是它最后一次活动的时间，也正是我们想比的
+        earliest = min(path.stat().st_mtime for path in files)
+        return _Baseline(datetime.fromtimestamp(earliest), is_first_time=True)
+
+    def new_sessions(self) -> list[Path]:
+        """基线之后产生的会话，新的在前。
+
+        从没整理过时，**所有会话都算新增** —— 它们确实都是「还没有任何整理」
+        之后产生的，包括最早那个（它正好落在基线上）。
+        """
+        baseline = self._baseline()
+        if baseline is None:
+            return []
+        if baseline.is_first_time:
+            return self.store.session_files()
+
+        cutoff = baseline.when.timestamp()
         return [
-            path
-            for path in self.store.session_files()
-            if path.stat().st_mtime > cutoff
+            path for path in self.store.session_files() if path.stat().st_mtime > cutoff
         ]
 
     def check(self) -> ConsolidationDecision:
         """判断该不该整理。两个条件是**并且**关系 —— 都满足才跑。"""
-        last_run = self._last_run()
+        baseline = self._baseline()
+        if baseline is None:
+            return ConsolidationDecision(False, "还没有任何会话记录")
+
         pending = self.new_sessions()
-
-        if last_run is None:
-            if not pending:
-                return ConsolidationDecision(False, "还没有任何会话记录")
-            return ConsolidationDecision(
-                True, f"从未整理过，现有 {len(pending)} 个会话"
-            )
-
-        elapsed = datetime.now() - last_run
+        elapsed = datetime.now() - baseline.when
         enough_time = elapsed >= timedelta(hours=self.min_hours)
         enough_sessions = len(pending) >= self.min_sessions
 
+        origin = "项目首次使用" if baseline.is_first_time else "上次整理"
         detail = (
-            f"距上次 {elapsed.total_seconds() / 3600:.1f} 小时"
+            f"距{origin} {elapsed.total_seconds() / 3600:.1f} 小时"
             f"（需 ≥{self.min_hours:g}），新增 {len(pending)} 个会话"
             f"（需 ≥{self.min_sessions}）"
         )

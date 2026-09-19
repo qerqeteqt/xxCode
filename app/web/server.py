@@ -269,6 +269,11 @@ def create_app(root: str | Path) -> FastAPI:
 
     @app.get("/api/sessions")
     async def list_sessions() -> list[dict]:
+        """只列**说过话**的会话。
+
+        点了「新会话」但没提问的会留下一条空记录 —— 那是占位，不是历史。
+        全列出来的话列表很快就被这些占位淹没了。
+        """
         return [
             {
                 "session_id": info.session_id,
@@ -277,8 +282,10 @@ def create_app(root: str | Path) -> FastAPI:
                 "message_count": info.message_count,
                 "total_tokens": info.total_tokens,
                 "files_changed": info.files_changed,
+                "title": info.title,
             }
-            for info in store.list_sessions(30)
+            for info in store.list_sessions(60)
+            if info.message_count > 0
         ]
 
     @app.post("/api/sessions")

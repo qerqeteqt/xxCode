@@ -8,54 +8,91 @@
   /* 主题用 CSS 变量切换 —— 只有这一处定义颜色，别的地方一律引用变量。
      这样加一个主题就是加一组变量，不用去改任何组件样式。 */
   :root[data-theme="dark"] {
-    --bg: #0d1117; --panel: #161b22; --raised: #1c2128;
+    --bg: #0d1117; --panel: #161b22; --raised: #1c2128; --hover: #21262d;
     --border: #30363d; --text: #e6edf3; --dim: #8b949e;
-    --accent: #58a6ff; --accent-fg: #0d1117;
+    --accent: #58a6ff; --accent-fg: #0d1117; --accent-soft: rgba(88,166,255,.14);
     --ok: #3fb950; --warn: #d29922; --err: #f85149;
     --code-bg: #010409;
   }
   :root[data-theme="light"] {
-    --bg: #ffffff; --panel: #f6f8fa; --raised: #ffffff;
+    --bg: #ffffff; --panel: #f6f8fa; --raised: #ffffff; --hover: #eef1f4;
     --border: #d0d7de; --text: #1f2328; --dim: #656d76;
-    --accent: #0969da; --accent-fg: #ffffff;
+    --accent: #0969da; --accent-fg: #ffffff; --accent-soft: rgba(9,105,218,.10);
     --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
     --code-bg: #f6f8fa;
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; margin: 0; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
   body {
     background: var(--bg); color: var(--text);
     font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-    display: flex; flex-direction: column;
+    display: flex;
   }
   code, pre, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
 
-  /* ---------- 顶栏 ---------- */
-  header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
-    flex: none;
-  }
-  header .brand { font-weight: 600; letter-spacing: .3px; }
-  header .root { color: var(--dim); font-size: 12px; overflow: hidden;
-                 text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   button {
     background: var(--raised); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 13px;
     font-family: inherit;
   }
-  button:hover { border-color: var(--accent); }
+  button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-  select {
-    background: var(--raised); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 8px; font-size: 13px; max-width: 260px;
+
+  /* ================= 左侧会话栏 ================= */
+  .sidebar {
+    width: 264px; flex: none; display: flex; flex-direction: column;
+    background: var(--panel); border-right: 1px solid var(--border);
+    transition: margin-left .18s ease;
+  }
+  .sidebar .top { padding: 12px; border-bottom: 1px solid var(--border); }
+  .sidebar .brand {
+    font-weight: 600; letter-spacing: .3px; display: flex; align-items: center;
+    justify-content: space-between; margin-bottom: 10px;
+  }
+  .sidebar .brand .ver { color: var(--dim); font-size: 11px; font-weight: 400; }
+  #newChat { width: 100%; text-align: center; }
+  .side-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .day {
+    color: var(--dim); font-size: 11px; padding: 10px 8px 4px;
+    position: sticky; top: 0; background: var(--panel);
+  }
+  .conv {
+    display: block; width: 100%; text-align: left; border: 1px solid transparent;
+    background: none; border-radius: 6px; padding: 7px 9px; cursor: pointer;
+    color: var(--text); font-size: 13px; line-height: 1.4; margin-bottom: 1px;
     font-family: inherit;
   }
+  .conv:hover { background: var(--hover); border-color: transparent; }
+  .conv.active { background: var(--accent-soft); border-color: var(--accent); }
+  .conv .title {
+    display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .conv .sub { color: var(--dim); font-size: 11px; margin-top: 2px; }
+  .conv .title.empty { color: var(--dim); font-style: italic; }
+  .sidebar .foot {
+    border-top: 1px solid var(--border); padding: 8px;
+    display: flex; gap: 6px; align-items: center;
+  }
+  .sidebar .foot .path {
+    flex: 1; color: var(--dim); font-size: 11px; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  }
 
-  /* ---------- 消息区 ---------- */
+  /* ================= 右侧对话区 ================= */
+  .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .chat > header {
+    display: flex; align-items: center; gap: 10px; padding: 9px 16px;
+    border-bottom: 1px solid var(--border); background: var(--panel); flex: none;
+  }
+  #toggleSide { display: none; }
+  .chat > header .now {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--dim); font-size: 13px;
+  }
+
   main { flex: 1; overflow-y: auto; padding: 20px 16px 8px; }
-  .wrap { max-width: 820px; margin: 0 auto; }
+  .wrap { max-width: 800px; margin: 0 auto; }
 
   .user-msg {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -63,23 +100,21 @@
   }
   .who { color: var(--dim); font-size: 12px; margin-bottom: 4px; }
 
-  .step-block { margin: 10px 0 10px 0; }
+  .step-block { margin: 10px 0; }
   .step-line {
     display: flex; align-items: center; gap: 10px;
     color: var(--dim); font-size: 12px; margin: 14px 0 8px;
   }
   .step-line::after { content: ""; flex: 1; height: 1px; background: var(--border); }
-
   .text-out { white-space: pre-wrap; word-break: break-word; margin: 8px 0; }
 
-  /* 工具卡片 */
   .tool {
     border: 1px solid var(--border); border-radius: 8px; margin: 6px 0;
     background: var(--panel); overflow: hidden;
   }
   .tool > summary {
-    cursor: pointer; padding: 7px 12px; display: flex; gap: 10px; align-items: baseline;
-    list-style: none; font-size: 13px;
+    cursor: pointer; padding: 7px 12px; display: flex; gap: 10px;
+    align-items: baseline; list-style: none; font-size: 13px;
   }
   .tool > summary::-webkit-details-marker { display: none; }
   .tool > summary::before { content: "▸"; color: var(--dim); font-size: 11px; }
@@ -87,6 +122,7 @@
   .tool .name { font-weight: 600; }
   .tool .args { color: var(--dim); overflow: hidden; text-overflow: ellipsis;
                 white-space: nowrap; flex: 1; }
+  .tool .from { color: var(--accent); font-size: 11px; }
   .tool .state { font-size: 11px; }
   .tool pre {
     margin: 0; padding: 10px 12px; border-top: 1px solid var(--border);
@@ -95,7 +131,6 @@
   }
   .ok { color: var(--ok); } .fail { color: var(--err); } .run { color: var(--warn); }
 
-  /* 权限卡 */
   .perm {
     border: 1px solid var(--warn); border-radius: 8px; padding: 12px 14px;
     background: color-mix(in srgb, var(--warn) 8%, transparent); margin: 12px 0;
@@ -112,10 +147,16 @@
   .note .partial { color: var(--dim); font-size: 13px; white-space: pre-wrap;
                    margin-top: 8px; max-height: 240px; overflow: auto; }
   .meta { color: var(--dim); font-size: 12px; margin: 10px 0 0; }
+  .empty {
+    color: var(--dim); text-align: center; margin-top: 22vh; font-size: 15px;
+  }
+  .empty kbd {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; font-family: inherit; font-size: 12px;
+  }
 
-  /* ---------- 输入区 ---------- */
   footer { flex: none; border-top: 1px solid var(--border); background: var(--panel); }
-  .composer { max-width: 820px; margin: 0 auto; padding: 12px 16px;
+  .composer { max-width: 800px; margin: 0 auto; padding: 12px 16px;
               display: flex; gap: 10px; align-items: flex-end; }
   textarea {
     flex: 1; resize: none; background: var(--bg); color: var(--text);
@@ -124,7 +165,7 @@
   }
   textarea:focus { outline: none; border-color: var(--accent); }
 
-  /* ---------- 设置抽屉 ---------- */
+  /* ================= 设置抽屉 ================= */
   .drawer {
     position: fixed; top: 0; right: 0; height: 100%; width: 360px; max-width: 92vw;
     background: var(--panel); border-left: 1px solid var(--border);
@@ -132,7 +173,10 @@
     display: flex; flex-direction: column; z-index: 20;
   }
   .drawer.open { transform: none; }
-  .drawer > header { gap: 8px; }
+  .drawer > header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    border-bottom: 1px solid var(--border); font-weight: 600;
+  }
   .drawer .body { padding: 16px; overflow-y: auto; flex: 1; }
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 13px; margin-bottom: 4px; }
@@ -145,7 +189,9 @@
   .seg { display: flex; gap: 6px; }
   .seg button { flex: 1; }
   .seg button.on { border-color: var(--accent); color: var(--accent); }
-  .ro { color: var(--dim); font-size: 12px; word-break: break-all; }
+  .ro { color: var(--dim); font-size: 12px; word-break: break-all;
+        white-space: pre-wrap; line-height: 1.7; }
+
   .toast {
     position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
     background: var(--raised); border: 1px solid var(--border); border-radius: 8px;
@@ -153,31 +199,48 @@
     transition: opacity .2s; pointer-events: none;
   }
   .toast.show { opacity: 1; }
+
+  /* 窄屏：会话栏变成浮层，用按钮唤起 */
+  @media (max-width: 720px) {
+    .sidebar { position: fixed; z-index: 15; height: 100%; margin-left: -264px; }
+    .sidebar.open { margin-left: 0; box-shadow: 0 0 40px rgba(0,0,0,.4); }
+    #toggleSide { display: inline-block; }
+  }
 </style>
 </head>
 <body>
 
-<header>
-  <span class="brand">xxCode</span>
-  <span class="root" id="rootLabel"></span>
-  <select id="sessionPick" title="切换会话"></select>
-  <button id="newSession" title="开一个新会话">＋ 新会话</button>
-  <button id="openSettings" title="设置">⚙</button>
-</header>
-
-<main id="main"><div class="wrap" id="log"></div></main>
-
-<footer>
-  <div class="composer">
-    <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
-    <button class="primary" id="send">发送</button>
+<aside class="sidebar" id="sidebar">
+  <div class="top">
+    <div class="brand"><span>xxCode</span><span class="ver">Runtime V1</span></div>
+    <button class="primary" id="newChat">＋ 新会话</button>
   </div>
-</footer>
+  <div class="side-list" id="convList"></div>
+  <div class="foot">
+    <span class="path" id="rootPath"></span>
+    <button id="openSettings" title="设置">⚙</button>
+  </div>
+</aside>
+
+<div class="chat">
+  <header>
+    <button id="toggleSide" title="会话列表">☰</button>
+    <span class="now" id="nowTitle">新会话</span>
+  </header>
+
+  <main id="main"><div class="wrap" id="log"></div></main>
+
+  <footer>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button class="primary" id="send">发送</button>
+    </div>
+  </footer>
+</div>
 
 <aside class="drawer" id="drawer">
   <header>
-    <span class="brand">设置</span>
-    <span style="flex:1"></span>
+    <span>设置</span><span style="flex:1"></span>
     <button id="closeSettings">关闭</button>
   </header>
   <div class="body">
@@ -207,20 +270,22 @@
 <script>
 "use strict";
 
-/* 字段说明。放前端而不是后端，因为「怎么解释这个配置」是给人看的文案，
-   和能否修改（EDITABLE_KEYS 白名单）是两件事。 */
+/* 字段说明放前端而不是后端：「怎么解释这个配置」是给人看的文案，
+   和「能不能改」（后端 EDITABLE_KEYS 白名单）是两件事。 */
 const FIELD_SPEC = {
-  LLM_MODEL:               { label: "模型", type: "text",
-                             hint: "例如 deepseek-chat / deepseek-reasoner" },
-  MAX_STEPS:               { label: "最大循环步数", type: "number",
-                             hint: "超过就中止并返回最后的进展" },
-  COMPACT_THRESHOLD_TOKENS:{ label: "上下文压缩阈值", type: "number",
-                             hint: "上一次调用的 prompt 超过这个数就压缩" },
-  CONSOLIDATE_MIN_HOURS:   { label: "记忆整理·最小间隔（小时）", type: "number" },
-  CONSOLIDATE_MIN_SESSIONS:{ label: "记忆整理·最小新会话数", type: "number" },
+  LLM_MODEL:                { label: "模型", type: "text",
+                              hint: "例如 deepseek-chat / deepseek-reasoner" },
+  MAX_STEPS:                { label: "最大循环步数", type: "number",
+                              hint: "超过就中止并返回最后的进展" },
+  COMPACT_THRESHOLD_TOKENS: { label: "上下文压缩阈值", type: "number",
+                              hint: "上一次调用的 prompt 超过这个数就压缩" },
+  CONSOLIDATE_MIN_HOURS:    { label: "记忆整理·最小间隔（小时）", type: "number" },
+  CONSOLIDATE_MIN_SESSIONS: { label: "记忆整理·最小新会话数", type: "number" },
 };
 
-const state = { sessionId: null, busy: false, stepBlock: null, toolCards: {} };
+const state = {
+  sessionId: null, busy: false, stepBlock: null, toolCards: {}, sessions: [],
+};
 
 const $ = (id) => document.getElementById(id);
 const log = $("log");
@@ -237,7 +302,7 @@ setTheme(localStorage.getItem("xxcode-theme") || "dark");
 document.querySelectorAll("[data-theme-set]").forEach((b) =>
   b.addEventListener("click", () => setTheme(b.dataset.themeSet)));
 
-// ---------------------------------------------------------------- 工具函数
+// ---------------------------------------------------------------- 小工具
 
 function toast(msg) {
   const el = $("toast");
@@ -247,7 +312,7 @@ function toast(msg) {
   el._t = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
-/** 一律用 textContent 赋值，不拼 innerHTML —— 模型输出和工具结果都是不可信内容。 */
+/** 一律 textContent，不拼 innerHTML —— 模型输出和工具结果都是不可信内容。 */
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
@@ -255,11 +320,109 @@ function el(tag, cls, text) {
   return node;
 }
 
-function scrollDown() { $("main").scrollTop = $("main").scrollHeight; }
+const scrollDown = () => { $("main").scrollTop = $("main").scrollHeight; };
 
 function humanTokens(n) {
   return n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
 }
+
+/** 「今天 / 昨天 / N 天前 / 9月19日」—— 列表按这个分组。 */
+function dayLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "更早";
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const diff = Math.round((day(new Date()) - day(d)) / 86400000);
+  if (diff <= 0) return "今天";
+  if (diff === 1) return "昨天";
+  if (diff < 7) return `${diff} 天前`;
+  return d.toLocaleDateString("zh-CN", { month: "long", day: "numeric" });
+}
+
+// ---------------------------------------------------------------- 会话列表
+
+async function loadSessions() {
+  state.sessions = await (await fetch("/api/sessions")).json();
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const list = $("convList");
+  list.innerHTML = "";
+  if (state.sessions.length === 0) {
+    list.append(el("div", "day", "还没有会话"));
+    return;
+  }
+
+  let lastDay = null;
+  for (const s of state.sessions) {
+    const day = dayLabel(s.started_at);
+    if (day !== lastDay) {
+      list.append(el("div", "day", day));
+      lastDay = day;
+    }
+
+    const btn = el("button", "conv" + (s.session_id === state.sessionId ? " active" : ""));
+    const title = el("span", "title" + (s.title ? "" : " empty"),
+                     s.title || "（还没提问）");
+    title.title = s.title || s.session_id;
+    btn.append(title);
+
+    const bits = [];
+    if (s.message_count) bits.push(`${s.message_count} 条`);
+    if (s.total_tokens) bits.push(humanTokens(s.total_tokens) + " tokens");
+    if (s.status === "failed") bits.push("未完成");
+    bits.push(s.started_at.slice(11, 16));
+    btn.append(el("span", "sub", bits.join(" · ")));
+
+    btn.onclick = () => {
+      if (state.busy) return toast("正在跑，等它结束再切");
+      $("sidebar").classList.remove("open");
+      switchTo(s.session_id);
+    };
+    list.append(btn);
+  }
+}
+
+async function switchTo(sessionId) {
+  state.sessionId = sessionId;
+  state.stepBlock = null;
+  state.toolCards = {};
+  log.innerHTML = "";
+  renderSidebar();
+
+  const msgs = await (await fetch(`/api/sessions/${sessionId}/messages`)).json();
+  $("nowTitle").textContent =
+    state.sessions.find((s) => s.session_id === sessionId)?.title || "新会话";
+
+  if (msgs.length === 0) {
+    const empty = el("div", "empty");
+    empty.append(el("div", null, "问点什么吧"));
+    log.append(empty);
+  } else {
+    for (const m of msgs) {
+      if (m.role === "user") addUser(m.text);
+      else {
+        const block = el("div", "step-block");
+        block.append(el("div", "text-out", m.text));
+        log.append(block);
+        state.stepBlock = block;
+      }
+    }
+    addMeta("—— 以上是历史。接着问吧。——");
+  }
+  scrollDown();
+  refreshConfig();
+}
+
+$("newChat").onclick = async () => {
+  if (state.busy) return toast("正在跑，等它结束");
+  const { session_id } = await (await fetch("/api/sessions", { method: "POST" })).json();
+  state.sessions = [];           // 强制重新拉，新会话才会出现在列表里
+  await loadSessions();
+  await switchTo(session_id);
+};
+
+$("toggleSide").onclick = () => $("sidebar").classList.toggle("open");
 
 // ---------------------------------------------------------------- 渲染
 
@@ -298,53 +461,50 @@ function addDelta(text) {
 function addToolCall(data) {
   const details = el("details", "tool");
   const summary = el("summary");
+  summary.append(el("span", "name", data.name));
+  if (data.source) summary.append(el("span", "from", data.source));
   summary.append(
-    el("span", "name", data.name),
     el("span", "args mono", prettyArgs(data.arguments)),
     el("span", "state run", "运行中…"),
   );
-  details.append(summary);
-  details.append(el("pre", null, "等待结果…"));
+  details.append(summary, el("pre", null, "等待结果…"));
   (state.stepBlock || log).append(details);
   state.toolCards[data.call_id] = details;
   scrollDown();
 }
 
 function addToolResult(data) {
-  const card = state.toolCards[data.call_id] || state.toolCards[Object.keys(state.toolCards).pop()];
+  const keys = Object.keys(state.toolCards);
+  const card = state.toolCards[data.call_id] || state.toolCards[keys[keys.length - 1]];
   if (!card) return;
-  card.querySelector(".state").textContent = data.ok ? "完成" : "失败";
-  card.querySelector(".state").className = "state " + (data.ok ? "ok" : "fail");
-  const pre = card.querySelector("pre");
-  pre.textContent = data.text + (data.truncated ? "\n…（已截断）" : "");
-  card.dataset.ok = data.ok;
+  const badge = card.querySelector(".state");
+  badge.textContent = data.ok ? "完成" : "失败";
+  badge.className = "state " + (data.ok ? "ok" : "fail");
+  card.querySelector("pre").textContent =
+    data.text + (data.truncated ? "\n…（已截断）" : "");
   scrollDown();
 }
 
 function prettyArgs(raw) {
   try {
-    const obj = JSON.parse(raw);
-    const parts = Object.entries(obj).map(([k, v]) => {
+    return Object.entries(JSON.parse(raw)).map(([k, v]) => {
       let s = typeof v === "string" ? v : JSON.stringify(v);
       if (s.length > 70) s = s.slice(0, 70) + "…";
       return `${k}: ${s}`;
-    });
-    return parts.join("  ");
+    }).join("  ");
   } catch { return raw; }
 }
 
 function addPermission(data) {
   const box = el("div", "perm");
-  box.append(el("div", "title", "⚠ 需要授权"));
-  box.append(el("div", "body", data.summary));
+  box.append(el("div", "title", "⚠ 需要授权"), el("div", "body", data.summary));
   const actions = el("div", "actions");
 
   const decide = async (decision) => {
     box.remove();
     try {
       await fetch(`/api/permission/${data.request_id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ decision }),
       });
     } catch (e) { toast("回复授权失败：" + e.message); }
@@ -358,7 +518,6 @@ function addPermission(data) {
   deny.onclick = () => decide("deny");
   actions.append(once, sess, deny);
   box.append(actions);
-
   (state.stepBlock || log).append(box);
   scrollDown();
 }
@@ -373,57 +532,7 @@ function addError(data) {
   scrollDown();
 }
 
-function addMeta(text) { log.append(el("div", "meta", text)); }
-
-// ---------------------------------------------------------------- 会话
-
-async function loadSessions(selectId) {
-  const list = await (await fetch("/api/sessions")).json();
-  const pick = $("sessionPick");
-  pick.innerHTML = "";
-  for (const s of list) {
-    const opt = el("option", null,
-      `${s.started_at.replace("T", " ")} · ${s.message_count} 条` +
-      (s.total_tokens ? ` · ${humanTokens(s.total_tokens)}` : ""));
-    opt.value = s.session_id;
-    pick.append(opt);
-  }
-  if (selectId) pick.value = selectId;
-}
-
-async function switchTo(sessionId) {
-  state.sessionId = sessionId;
-  state.stepBlock = null;
-  state.toolCards = {};
-  log.innerHTML = "";
-
-  const msgs = await (await fetch(`/api/sessions/${sessionId}/messages`)).json();
-  if (msgs.length === 0) {
-    addMeta("新会话。问点什么吧。");
-  } else {
-    for (const m of msgs) {
-      if (m.role === "user") addUser(m.text);
-      else {
-        const block = el("div", "step-block");
-        block.append(el("div", "text-out", m.text));
-        log.append(block);
-        state.stepBlock = block;
-      }
-    }
-    addMeta("—— 以上是历史。接着问吧。——");
-  }
-  scrollDown();
-  refreshConfig();
-}
-
-$("sessionPick").addEventListener("change", (e) => switchTo(e.target.value));
-
-$("newSession").onclick = async () => {
-  if (state.busy) return toast("正在跑，等它结束");
-  const { session_id } = await (await fetch("/api/sessions", { method: "POST" })).json();
-  await loadSessions(session_id);
-  await switchTo(session_id);
-};
+const addMeta = (text) => { log.append(el("div", "meta", text)); scrollDown(); };
 
 // ---------------------------------------------------------------- 对话
 
@@ -431,6 +540,9 @@ async function send() {
   const input = $("input");
   const question = input.value.trim();
   if (!question || state.busy) return;
+
+  const empty = log.querySelector(".empty");
+  if (empty) empty.remove();
 
   addUser(question);
   input.value = "";
@@ -441,8 +553,7 @@ async function send() {
 
   try {
     const resp = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: state.sessionId, question }),
     });
     if (!resp.ok) {
@@ -475,7 +586,7 @@ async function send() {
   } finally {
     state.busy = false;
     $("send").disabled = false;
-    loadSessions(state.sessionId);
+    await loadSessions();   // 标题、条数、tokens 都会变
   }
 }
 
@@ -519,11 +630,11 @@ async function refreshConfig() {
   if (!fields.dataset.built) {
     for (const [key, spec] of Object.entries(FIELD_SPEC)) {
       const box = el("div", "field");
-      const label = el("label", null, spec.label);
+      box.append(el("label", null, spec.label));
       const input = el("input");
       input.id = "cfg-" + key;
       input.type = spec.type;
-      box.append(label, input);
+      box.append(input);
       if (spec.hint) box.append(el("div", "hint", spec.hint));
       fields.append(box);
     }
@@ -534,7 +645,8 @@ async function refreshConfig() {
     if (input && document.activeElement !== input) input.value = value;
   }
 
-  $("rootLabel").textContent = cfg.readonly.root;
+  $("rootPath").textContent = cfg.readonly.root;
+  $("rootPath").title = cfg.readonly.root;
   $("readonly").textContent =
     `root     ${cfg.readonly.root}\n` +
     `接口     ${cfg.readonly.llm_base_url}\n` +
@@ -549,8 +661,7 @@ $("saveSettings").onclick = async () => {
     if (raw !== "") values[key] = raw;
   }
   const resp = await fetch("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ values }),
   });
   const body = await resp.json();
@@ -562,12 +673,12 @@ $("saveSettings").onclick = async () => {
 
 (async function boot() {
   await loadSessions();
-  const pick = $("sessionPick");
-  if (pick.value) {
-    await switchTo(pick.value);
+  const first = state.sessions[0];
+  if (first) {
+    await switchTo(first.session_id);
   } else {
     const { session_id } = await (await fetch("/api/sessions", { method: "POST" })).json();
-    await loadSessions(session_id);
+    await loadSessions();
     await switchTo(session_id);
   }
   $("input").focus();

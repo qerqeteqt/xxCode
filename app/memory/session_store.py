@@ -132,6 +132,9 @@ class SessionInfo:
     message_count: int
     files_changed: list[str]
     total_tokens: int = 0
+    # 第一条用户消息。给会话列表当标题用 —— 光看 id 和时间分不出哪条是哪条，
+    # 而「用户最开始问的那句话」天生就是这条会话的摘要
+    title: str = ""
 
 
 def read_records(path: Path) -> list[dict]:
@@ -254,14 +257,20 @@ class Session:
 
     def summary(self) -> SessionInfo:
         records = read_records(self.path)
-        started_at, status = "", "running"
+        started_at, status, title = "", "running", ""
         for record in records:
-            if record.get("type") == "session_start":
+            kind = record.get("type")
+            if kind == "session_start":
                 started_at = record.get("ts", "")
-            elif record.get("type") == "state":
+            elif kind == "state":
                 status = (record.get("state") or {}).get("status", status)
-            elif record.get("type") == "session_end":
+            elif kind == "session_end":
                 status = record.get("status", status)
+            elif kind == "message" and not title:
+                message = record.get("message") or {}
+                if message.get("role") == "user" and message.get("content"):
+                    # 换行会让列表变成一个高矮不一的方块，压成一行
+                    title = " ".join(str(message["content"]).split())[:120]
 
         return SessionInfo(
             session_id=self.session_id,
@@ -271,6 +280,7 @@ class Session:
             message_count=sum(1 for r in records if r.get("type") == "message"),
             files_changed=list(self.state.files_changed),
             total_tokens=self.state.total_tokens,
+            title=title,
         )
 
 

@@ -333,3 +333,32 @@ def test_工具改动文件会实时进_state(tmp_path):
 
     # 落盘之后再读回来，改动清单还在
     assert SessionStore(tmp_path).load(session.session_id).state.files_changed == ["新文件.py"]
+
+
+def test_会话标题取自第一条用户提问(tmp_path):
+    """会话列表靠它当标题 —— 光看 id 和时间分不出哪条是哪条。"""
+    session = SessionStore(tmp_path).create()
+    session.append_message({"role": "assistant", "content": "（这是系统开场，不算）"})
+    session.append_message({"role": "user", "content": "给 calc.py 加个函数\n第二行不该出现"})
+    session.append_message({"role": "user", "content": "第二个问题"})
+    session.finish("finished")
+
+    info = SessionStore(tmp_path).list_sessions()[0]
+
+    assert info.title == "给 calc.py 加个函数 第二行不该出现"  # 换行压成空格
+    assert "第二个问题" not in info.title  # 只取第一条
+
+
+def test_没提问过的会话标题为空(tmp_path):
+    session = SessionStore(tmp_path).create()
+    session.finish("finished")
+
+    assert SessionStore(tmp_path).list_sessions()[0].title == ""
+
+
+def test_超长标题被截断(tmp_path):
+    session = SessionStore(tmp_path).create()
+    session.append_message({"role": "user", "content": "很长的提问" * 50})
+    session.finish("finished")
+
+    assert len(SessionStore(tmp_path).list_sessions()[0].title) == 120

@@ -32,6 +32,37 @@ def decode_bytes(data: bytes, *, prefer_utf8: bool = True) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+_SIZE_UNITS = ("B", "KB", "MB", "GB", "TB", "PB")
+
+
+def human_size(n: int) -> str:
+    """把字节数变成 '1.2 KB' 这样的可读形式，1024 进制。
+
+    给模型看的数字要能一眼比大小：1048576 和 2097152 得数零，
+    '1.0 MB' 和 '2.0 MB' 不用。所以超过 1 KB 就换单位，保留一位小数。
+
+    两个刻意的选择：
+
+        B 不带小数         '512 B' 比 '512.0 B' 干净，字节本来就是整数
+        只保留一位小数      '1.2 KB' 够用了，再精确反而更难扫读
+
+    负数按 0 处理 —— 调用方多半是 stat().st_size 或 len()，真出现负数说明上游
+    有问题，但这里没必要抛异常把整个工具调用带崩。
+    """
+    if n < 0:
+        n = 0
+
+    size = float(n)
+    for unit in _SIZE_UNITS:
+        if size < 1024 or unit == _SIZE_UNITS[-1]:
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+
+    return f"{size:.1f} {_SIZE_UNITS[-1]}"  # 到不了，兜底
+
+
 def truncate(text: str, limit: int) -> str:
     """超长就截断并注明原始长度。
 

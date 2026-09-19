@@ -343,7 +343,13 @@ def test_只读命令不再弹窗(project):
 
 @pytest.mark.parametrize(
     "command",
-    ["mkdir 新目录", "rm -rf build", "python -c 'print(1)'", "echo x > 文件"],
+    [
+        "mkdir 新目录",
+        "rm -rf build",
+        "python -c 'print(1)'",
+        "echo x > 文件",
+        "cat a.txt > b.txt",
+    ],
 )
 def test_可能改东西的命令仍然要问(project, command):
     confirmer = FakeConfirmer(Decision.DENY)
@@ -409,3 +415,20 @@ def test_subagent_工具本身标为_read(project):
 
     assert SubAgentTool.risk == "read"
     assert "Explore" in AGENT_SPECS  # 顺带确认 import 没坏
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat a.txt 2>/dev/null | head",
+        "grep -rn X . 2>/dev/null",
+        "ls -la 2>&1",
+        "find . -name '*.py' > /dev/null",
+    ],
+)
+def test_丢弃输出的重定向不算写操作(command):
+    """`2>/dev/null` 是最常见的只读脚手架，因为一个 `>` 就弹窗是误报 ——
+    实测第一次真实使用时就撞上了。"""
+    from app.tools.permission import is_read_only_command
+
+    assert is_read_only_command(command) is True

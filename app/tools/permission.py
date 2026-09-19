@@ -35,6 +35,7 @@
 import fnmatch
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -84,6 +85,13 @@ READ_ONLY_COMMANDS: tuple[str, ...] = (
 # 这些字符一出现就不当只读 —— `>` 能写文件，反引号/`$()` 能执行命令
 _WRITE_INDICATORS = (">", "`", "$(")
 
+# 「丢弃输出」的写法，不是写文件。判断前先摘掉。
+# 不摘的话 `cat x 2>/dev/null | head` 会因为那个 `>` 被当成写操作弹窗 ——
+# 实测第一次真实使用时就撞上了，而它恰恰是最常见的只读脚手架。
+_HARMLESS_REDIRECTS = re.compile(
+    r"\d*>>?\s*(/dev/null|NUL|\$null|&[12])", re.IGNORECASE
+)
+
 
 def is_read_only_command(command: str) -> bool:
     """这条 shell 命令看起来是只读的吗。
@@ -92,7 +100,7 @@ def is_read_only_command(command: str) -> bool:
     它要解决的是「噪声太多导致用户不看提示」，不是「挡住恶意命令」——
     后者得靠操作系统级隔离。
     """
-    stripped = command.strip()
+    stripped = _HARMLESS_REDIRECTS.sub("", command).strip()
     if any(token in stripped for token in _WRITE_INDICATORS):
         return False
     return any(

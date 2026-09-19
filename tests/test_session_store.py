@@ -225,6 +225,8 @@ def test_list_sessions_返回摘要(tmp_path):
 
 
 def test_跑一轮之后_jsonl_里有完整会话(tmp_path):
+    """system prompt 不落盘（它是每次现拼的配置，见 MainAgent.run 的注释），
+    所以 JSONL 里只有对话本身。"""
     session = SessionStore(tmp_path).create()
     llm = ScriptedLLM([_assistant("我是答案")])
     registry = build_default_registry(tmp_path, on_file_changed=session.add_changed_file)
@@ -235,9 +237,9 @@ def test_跑一轮之后_jsonl_里有完整会话(tmp_path):
 
     assert answer == "我是答案"
     messages = session.load_messages()
-    assert [m["role"] for m in messages] == ["system", "user", "assistant"]
-    assert messages[1]["content"] == "你好"
-    assert messages[2]["content"] == "我是答案"
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "你好"
+    assert messages[1]["content"] == "我是答案"
 
 
 def test_恢复会话后接着聊能看到之前的历史(tmp_path):

@@ -20,7 +20,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-# 遍历时跳过的目录。
+# 遍历时按**目录名**跳过的目录 —— 不管出现在哪一层都跳。
 # 为什么这件事非做不可：Grep 会走遍大量文件，如果连 .git（几千个二进制对象）
 # 和 .venv（几万个文件）都扫，一次搜索能跑几分钟，而且返回的全是乱码噪声。
 IGNORED_DIRS = frozenset(
@@ -40,9 +40,16 @@ IGNORED_DIRS = frozenset(
         ".pytest_cache",
         "dist",
         "build",
-        ".agent",  # Runtime 自己的数据目录，对代码任务没意义
     }
 )
+
+# 按**相对 root 的路径**跳过的目录。和上面按名字的区别在于它能区分同名的兄弟目录。
+#
+# 唯一一条规则为什么是 .agent/sessions：Runtime 自己有两类数据 ——
+#   .agent/sessions  对话流水，几千行 JSONL，对代码任务纯属噪声
+#   .agent/memory    长期记忆的 Markdown，**是给 Agent 读的**，必须放行
+# 早先图省事把整个 .agent 一刀切掉，结果 Phase 5 要让 Agent 读记忆时就没路了。
+IGNORED_PATHS = frozenset({".agent/sessions"})
 
 
 class PathOutOfSandboxError(PermissionError):
@@ -82,8 +89,19 @@ class Sandbox:
         except ValueError:
             return path.as_posix()
 
+    def _should_skip_dir(self, directory: Path) -> bool:
+        """这个目录该不该跳过。两条规则：按名字，以及按相对路径。"""
+        if directory.name in IGNORED_DIRS:
+            return True
+        try:
+            relative = directory.relative_to(self.root).as_posix()
+        except ValueError:
+            # 不在 root 之内（理论上不会发生，base 已经过 resolve），保守放行
+            return False
+        return relative in IGNORED_PATHS
+
     def iter_files(self, base: Path) -> Iterator[Path]:
-        """遍历 base 下的所有文件，跳过 IGNORED_DIRS。
+        """遍历 base 下的所有文件，跳过 IGNORED_DIRS / IGNORED_PATHS。
 
         遍历逻辑放在 Sandbox 里而不是各个工具里，是因为「哪些目录算项目的一部分」
         本身就是沙箱该回答的问题 —— 它和「路径能不能出圈」是同一个边界的两面。
@@ -94,8 +112,11 @@ class Sandbox:
         它照样会走进 .venv 再逐个过滤，该慢还是慢。
         """
         for dirpath, dirnames, filenames in os.walk(base):
+            current = Path(dirpath)
             # 原地修改 dirnames 是 os.walk 的剪枝约定：
             # 被移除的目录这一轮就不会再往下走
-            dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
+            dirnames[:] = [
+                d for d in dirnames if not self._should_skip_dir(current / d)
+            ]
             for filename in filenames:
-                yield Path(dirpath) / filename
+                yield current / filename

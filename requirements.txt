@@ -3,3 +3,5 @@ pydantic>=2.12
 pydantic-settings>=2.12
 python-dotenv>=1.2
 httpx>=0.28
+# 解析记忆文件的 frontmatter（.agent/memory/*.md 的元信息）
+PyYAML>=6.0

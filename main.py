@@ -19,6 +19,7 @@ from pathlib import Path
 
 from app.agent.main_agent import MainAgent
 from app.llm.client import LLMClient
+from app.memory import MemoryManager
 from app.memory.session_store import SessionError, SessionStore
 from app.tools import build_default_registry
 from config.settings import get_settings
@@ -50,14 +51,24 @@ async def _run(question: str, root: Path, session_ref: str | None, resume: bool)
             root, llm=llm, on_file_changed=session.add_changed_file
         )
 
+        # 启动时重建一次索引：索引是派生数据，这样永远和目录里的文件一致，
+        # 也顺带覆盖了「你手工丢了个新 md 进去」这种情况
+        memory = MemoryManager(root)
+        memory.sync_index()
+
         logger.info("项目 root: %s", root)
         logger.info("会话: %s", session.session_id)
         logger.info("已注册工具: %s", ", ".join(t.name for t in registry.list_tools()))
+        logger.info("长期记忆: %d 条", len(memory.list_memories()))
         if session.state.files_changed:
             logger.info("本会话此前改动: %s", ", ".join(session.state.files_changed))
 
         agent = MainAgent(
-            llm=llm, registry=registry, session=session, max_steps=settings.max_steps
+            llm=llm,
+            registry=registry,
+            session=session,
+            memory=memory,
+            max_steps=settings.max_steps,
         )
 
         try:

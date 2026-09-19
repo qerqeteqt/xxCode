@@ -24,7 +24,7 @@
 app/
   agent/      main_agent.py  react_loop.py  subagent.py
   llm/        client.py
-  memory/     session_store.py
+  memory/     session_store.py  memory_manager.py
   tools/      base.py  registry.py  sandbox.py  text.py
               file_tool.py  bash_tool.py  search_tool.py  subagent_tool.py
 .agent/
@@ -59,6 +59,9 @@ pytest.ini
 - **工具返回值分两层**：`Tool.execute()` 返回结构化的 `ToolResult(ok, text, changed_path)`，
   给 Runtime 自己用；`ToolRegistry.execute()` 只把 `text` 交给模型。
   这样「这个文件到底改成了没有」是读一个字段，而不是嗅探返回文本的前缀。
+- **派生数据不手工维护**：`MEMORY.md` 是从记忆目录里的文件重新算出来的，
+  不是谁记得去更新它。手工维护索引有个很隐蔽的失败模式 —— **孤儿记忆**：
+  文件存在、内容很好，但索引里没有链接，于是没有任何人会知道它。
 - **文件型 Persistence**：Store 实现可替换，未来换数据库不触碰 Runtime 核心逻辑。
 
 ## 会话
@@ -67,23 +70,57 @@ pytest.ini
 
 ```jsonl
 {"v":1,"ts":"...","session_id":"20260919-191419-e649","type":"session_start","root":"..."}
-{"v":1,"ts":"...","type":"message","message":{"role":"system","content":"..."}}
 {"v":1,"ts":"...","type":"message","message":{"role":"user","content":"给 calc.py 加个函数"}}
 {"v":1,"ts":"...","type":"message","message":{"role":"assistant","tool_calls":[...]}}
 {"v":1,"ts":"...","type":"state","state":{"status":"running","files_changed":["src/calc.py"]}}
 {"v":1,"ts":"...","type":"session_end","status":"finished"}
 ```
 
-两个关键点：
+三个关键点：
 
 - **`message` 里存的是原样的 API 消息**，恢复时过滤出 `type=="message"` 取出 `.message`
-  就直接得到能喂给 LLM 的 messages —— 零转换。`system` 也在里面，恢复时不用另拼。
+  就直接得到能喂给 LLM 的 messages —— 零转换。
+- **system prompt 不落盘**：它是「配置」不是「历史」，而且带着长期记忆的索引，
+  而记忆是会变的。冻结进 JSONL 的话，续会话时 Agent 看到的就是过时的索引。
+  所以每次运行现拼一份插在最前面。
 - **append-only**：每条消息产生时立刻写一行。进程崩了，已经发生的事还在。
   所以 State 也是「每次变化追加一行」，不覆盖写 —— 覆盖写遇到写一半崩溃会留下坏文件。
 
 State 只保留真正有人读的字段（`session_id` / `status` / `files_changed` / 时间戳）。
 文档第八节列的 `task` / `plan` / `findings` 在 V1 没有消费者 —— 模型本来就用自然语言
 在 messages 里表达了它们，再抽一遍只是空转。
+
+## 长期记忆
+
+`.agent/memory/` 下平铺若干 Markdown 文件，`MEMORY.md` 是它们的索引：
+
+```markdown
+---
+name: calc 模块编码约定
+description: 给 calc.py 加函数时必须遵守的规则，代码里看不出来
+category: Project
+---
+
+1. 所有函数必须是纯函数，不许读写模块级变量或全局状态
+...
+```
+
+元信息放 frontmatter，正文是纯 Markdown —— 文件本身就是一篇能读的文章，
+元信息只服务于索引生成。
+
+**`MEMORY.md` 是派生数据**：由 `MemoryManager` 扫描目录重新算出来，启动时和每次增删改后
+自动重建。所以手工丢一个 `.md` 进去，下次启动它就会被收录 —— 没人需要记得更新索引。
+
+**记忆是给 Agent 读的**，所以沙箱放行 `.agent/memory`（但仍然挡住 `.agent/sessions`）。
+Agent 用普通的 `Read` / `Grep` 就能读记忆，不需要专用工具。
+
+索引会拼进 Main Agent 的 system prompt（每行一条链接加一句描述），
+这样 Agent 知道有哪些记忆存在；需要细节时再 `Read` 打开具体文件。
+SubAgent 不注入 —— 它是执行者，任务已经很具体，一份索引只会分散注意力。
+
+> **Phase 5 只做了存储层。** 文档第十三节明确把「什么信息值得长期保存」划给了
+> AutoDream，所以 `MemoryManager` 刻意保持"哑"：只有 `list` / `read` / `write` /
+> `update` / `delete` / `sync_index`，不含任何判断。往记忆里自动写东西是 Phase 6 的事。
 
 ## SubAgent
 
@@ -121,7 +158,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
 - [x] Phase 2 — Tool 抽象 → ToolRegistry → FileTool / BashTool / SearchTool
 - [x] Phase 3 — SubAgent Runtime → Explore / Plan / General-Purpose → SubAgentTool
 - [x] Phase 4 — State → JSONL Session Store
-- [ ] Phase 5 — MemoryManager → MEMORY.md → Markdown Memory
+- [x] Phase 5 — MemoryManager → MEMORY.md → Markdown Memory
 - [ ] Phase 6 — Scheduler → AutoDream → Memory Consolidation
 - [ ] Phase 7 — Retry / Logging / Async / Parallel SubAgent / Permission / Streaming …
 

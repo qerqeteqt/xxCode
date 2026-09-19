@@ -20,9 +20,12 @@
 """
 
 import logging
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from app.llm.client import LLMClient
+
+if TYPE_CHECKING:
+    from app.context.compactor import ContextCompactor
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,7 @@ async def run_react_loop(
     tools: list[dict] | None = None,
     max_steps: int = 10,
     on_message: MessageHook | None = None,
+    compactor: "ContextCompactor | None" = None,
 ) -> str:
     """驱动 ReAct 循环，返回模型的最终回答。
 
@@ -64,6 +68,10 @@ async def run_react_loop(
     on_message 每追加一条消息就回调一次。为什么需要这个口子：循环是**就地修改**
     messages 的，调用方在循环外面看不到中间追加了什么。没有它就只能等整个任务
     跑完再一次性落盘 —— 那就丢掉了 JSONL 唯一的优势：进程崩了，已经发生的还在。
+
+    compactor 是可选的上文压缩器。放在循环里而不是调用方，是因为它必须在
+    **每一次 LLM 调用之前**检查 —— 上下文是在循环内部一步步长起来的，
+    等到循环结束再压就已经晚了（那一次调用可能已经直接撞上上限报错）。
     """
     def record(message: dict) -> None:
         messages.append(message)
@@ -71,6 +79,11 @@ async def run_react_loop(
             on_message(message)
 
     for step in range(1, max_steps + 1):
+        if compactor is not None:
+            # 压缩是就地改 messages 的，所以 record 的调用方（Session）不会
+            # 收到「消息被删了」的通知 —— 它靠 compactor 自己的回调写 compaction 记录
+            await compactor.maybe_compact(messages)
+
         msg = await llm.chat(messages, tools=tools)
 
         tool_calls = msg.get("tool_calls")

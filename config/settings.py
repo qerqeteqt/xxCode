@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     consolidate_min_hours: float = 24.0
     consolidate_min_sessions: int = 5
 
+    # 上下文压缩的触发阈值（上一次调用真实的 prompt token 数）。
+    # deepseek-chat 的上限是 64k，40k 留出余量给回复和后续增长。
+    compact_threshold_tokens: int = 40_000
+
 
 @lru_cache
 def get_settings() -> Settings:

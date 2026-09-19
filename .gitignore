@@ -27,4 +27,7 @@ env/
 # ---- Agent Runtime 运行数据 ----
 # sessions 是运行时产生的对话流水，属于本机数据，不入库
 .agent/sessions/
+# 整理状态和备份也要看本机情况，换台机器就重来，没必要入库
+.agent/consolidation.json
+.agent/memory-backups/
 # 注意：.agent/memory/ 下的 Markdown 是长期知识，需要入库，故不在此忽略

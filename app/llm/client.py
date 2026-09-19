@@ -153,6 +153,9 @@ class LLMClient:
         # 累计用量。SubAgent / AutoDream 走的是同一个 client，所以这里统计的是
         # 「这个 client 一共花了多少」—— 对账单来说正是想要的数
         self.usage = TokenUsage()
+        # 上一次调用的 prompt 有多大。上下文压缩靠它判断该不该压 ——
+        # 这是**真实数字**，比拿字符数估算 token 准得多，而且不额外花钱
+        self.last_prompt_tokens = 0
 
     # ------------------------------------------------------------ 网络
 
@@ -228,7 +231,9 @@ class LLMClient:
 
         try:
             data = resp.json()
-            self.usage = self.usage + _usage_of(data)
+            usage = _usage_of(data)
+            self.usage = self.usage + usage
+            self.last_prompt_tokens = usage.prompt_tokens
             return _normalize_message(data["choices"][0]["message"])
         except (KeyError, IndexError, ValueError) as e:
             raise LLMError(f"LLM 响应结构异常: {resp.text[:500]}") from e

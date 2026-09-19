@@ -23,6 +23,7 @@ from pathlib import Path
 
 from app.agent.main_agent import MainAgent
 from app.agent.react_loop import MaxIterationError
+from app.context.compactor import ContextCompactor
 from app.llm.client import LLMClient, human_tokens
 from app.memory import MemoryManager
 from app.memory.session_store import SessionError, SessionStore
@@ -71,11 +72,20 @@ async def _run_session(
         if session.state.files_changed:
             logger.info("本会话此前改动: %s", ", ".join(session.state.files_changed))
 
+        # 压缩记录要写进会话文件（on_compaction），恢复时才能把内存和磁盘对上。
+        # 只给 Main Agent 配：SubAgent 和 AutoDream 的步数是有上界的，Context 长不到哪去
+        compactor = ContextCompactor(
+            llm,
+            threshold_tokens=settings.compact_threshold_tokens,
+            on_compaction=session.record_compaction,
+        )
+
         agent = MainAgent(
             llm=llm,
             registry=registry,
             session=session,
             memory=memory,
+            compactor=compactor,
             max_steps=settings.max_steps,
         )
 

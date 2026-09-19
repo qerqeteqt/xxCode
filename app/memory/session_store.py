@@ -39,6 +39,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# 摘要消息长什么样，是压缩那边定义的（app/context/compactor.py）。这里 import 过来
+# 而不是自己拼一遍：存储层的职责是**忠实重放**，格式的定义权归制造它的那一方。
+# 两边各写一份的话，改一处忘一处就会出现「恢复出来的 Context 和当初跑的不是一回事」。
+from app.context.compactor import SUMMARY_TAG
+
 logger = logging.getLogger(__name__)
 
 SESSION_DIR = ".agent/sessions"
@@ -51,6 +56,10 @@ class SessionError(RuntimeError):
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _summary_message(summary: str | None) -> dict:
+    return {"role": "user", "content": f"{SUMMARY_TAG}\n{summary or ''}"}
 
 
 @dataclass
@@ -187,6 +196,18 @@ class Session:
         self.state.updated_at = _now()
         self._append({"type": "state", "state": self.state.to_dict()})
 
+    def record_compaction(self, summary: str, keep_count: int) -> None:
+        """记一条上下文压缩记录。
+
+        为什么必须记：压缩会把内存里的 messages 整个换掉，但 JSONL 是 append-only 的，
+        原始消息早就写下去了、不会也不该删。这条记录就是一句声明 ——
+        「从这一刻起，我前面的那些消息等价于这段摘要 + 最后 keep_count 条」。
+        恢复会话时靠它把内存和磁盘重新对上。
+        """
+        self._append(
+            {"type": "compaction", "summary": summary, "keep_count": keep_count}
+        )
+
     def record_usage(self, prompt_tokens: int, completion_tokens: int, calls: int) -> None:
         """记下这个会话的 token 用量（在会话结束时调用一次）。
 
@@ -213,14 +234,23 @@ class Session:
     def load_messages(self) -> list[dict]:
         """读出可以直接喂给 LLM 的 messages。
 
-        零转换：JSONL 里存的就是原样的 API 消息，这里只是把它们摘出来。
+        原始消息按顺序摘出来；碰到 compaction 记录，就把它之前的消息全部换成那条摘要，
+        只留最近 keep_count 条。这样**反复压缩也能正确重放** —— 记录是按发生顺序写的，
+        重放一遍就等于把当时的压缩过程又走了一次。
+
         不含 system —— 那是每次运行现拼的配置，不落盘（见 MainAgent.run）。
         """
-        return [
-            record["message"]
-            for record in read_records(self.path)
-            if record.get("type") == "message" and isinstance(record.get("message"), dict)
-        ]
+        messages: list[dict] = []
+        for record in read_records(self.path):
+            kind = record.get("type")
+            if kind == "message" and isinstance(record.get("message"), dict):
+                messages.append(record["message"])
+            elif kind == "compaction":
+                keep = int(record.get("keep_count") or 0)
+                messages = [_summary_message(record.get("summary"))] + (
+                    messages[-keep:] if keep > 0 else []
+                )
+        return messages
 
     def summary(self) -> SessionInfo:
         records = read_records(self.path)

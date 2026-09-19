@@ -8,11 +8,16 @@ Phase 2 起它持有 ToolRegistry：schema 从 registry 取，执行也从 regis
 一个名字」，和 ReAct Loop 保持同一个抽象层级。
 """
 
+from typing import TYPE_CHECKING
+
 from app.agent.react_loop import ExecuteTool, MessageHook, run_react_loop
 from app.llm.client import LLMClient
 from app.memory.memory_manager import INDEX_LINK_PREFIX, MemoryManager
 from app.memory.session_store import Session
 from app.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from app.context.compactor import ContextCompactor
 
 DEFAULT_SYSTEM_PROMPT = """你是一个 Code Agent，可以读写代码文件、执行命令、搜索代码库。
 
@@ -61,6 +66,7 @@ class MainAgent:
         registry: ToolRegistry | None = None,
         session: Session | None = None,
         memory: MemoryManager | None = None,
+        compactor: "ContextCompactor | None" = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_steps: int = 10,
     ) -> None:
@@ -68,6 +74,7 @@ class MainAgent:
         self._system_prompt = _compose_system_prompt(system_prompt, memory)
         self._max_steps = max_steps
         self._session = session
+        self._compactor = compactor
 
         # registry 是可选依赖：不传就是 Phase 1 那种「没有工具」的状态。
         # 两种能力（schema 给模型看、execute 真执行）都从同一个对象取，
@@ -121,4 +128,5 @@ class MainAgent:
             tools=self._tools,
             max_steps=self._max_steps,
             on_message=self._message_hook,
+            compactor=self._compactor,
         )

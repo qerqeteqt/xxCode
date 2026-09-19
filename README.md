@@ -24,6 +24,7 @@
 app/
   agent/      main_agent.py  react_loop.py  subagent.py
   llm/        client.py
+  context/    compactor.py
   memory/     session_store.py  memory_manager.py
               memory_tools.py  auto_dream.py
   scheduler/  scheduler.py
@@ -40,7 +41,7 @@ main.py
 pytest.ini
 ```
 
-规划中的模块（`context/`、`scheduler/`）随对应 Phase 落地。
+规划中的模块随对应 Phase 落地（`context/` 在 Phase 7b 到了，只剩 Web UI）。
 `.agent/sessions/` 是运行时数据，不入库；`.agent/memory/` 是长期知识，入库。
 
 ## 核心理念
@@ -204,7 +205,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
 - [x] Phase 6 — Scheduler → AutoDream → Memory Consolidation
 - [ ] Phase 7 — 完善（文档把它写成一个大清单，但一次做完就违反「不一次性实现全部模块」的原则，所以拆开推）
   - [x] 7a — Retry + Token Management
-  - [ ] 7b — Context Compaction
+  - [x] 7b — Context Compaction
   - [ ] 7c — Permission
   - [ ] 7d — Parallel SubAgent / Streaming / Web UI
 
@@ -249,6 +250,37 @@ JSON、参数不符合 schema、工具自身执行失败，四种情况都会转
 
 Bash 的安全档位目前是「危险命令黑名单」，挡的是**误伤而非攻击者**；
 完整的权限系统（可配置策略 / 人工确认 / 容器隔离）属于 Phase 7。
+
+## 上下文压缩
+
+`messages` 只增不减，跑几十轮之后每轮都要把完整历史重发一遍 —— token 往平方上走，
+迟早撞上模型上限直接报错。所以循环在**每次 LLM 调用之前**检查一次，超了就压：
+
+```
+[system] + [要压掉的一大段] + [最近 ≥8 条原样保留]
+                ↓ 一次独立的 LLM 摘要调用
+[system] + [摘要] + [最近 ≥8 条]
+```
+
+三个决定：
+
+- **何时压**：用 `llm.last_prompt_tokens`，也就是上一次调用**真实的** prompt 大小
+  （`COMPACT_THRESHOLD_TOKENS`，默认 40000）。比拿字符数估算准得多，而且免费。
+- **切在哪**：优先 `user` 消息（轮次的自然边界）。**硬约束是切点不能落在 `tool` 消息上** ——
+  tool 必须紧跟它归属的 assistant，配对断了 API 直接 400。找不到合适的 user 就退一步切在
+  任何非 tool 的位置，长时间单轮任务（一路 Read/Grep 中间没有新 user 发言）靠的就是这条退路。
+- **system 必须留住**：它是整个会话的角色和规则，丢了 Agent 会在压缩之后「忘记自己是谁」。
+
+**JSONL 怎么办**：压缩会把内存里的 messages 整个换掉，但 JSONL 是 append-only 的，
+原始消息早写下去了、不删。所以压缩时追加一条声明：
+
+```jsonl
+{"type":"compaction","summary":"...","keep_count":8}
+```
+
+意思是「从这一刻起，我前面的消息等价于这段摘要 + 最后 8 条」。恢复时按顺序重放，
+碰到 compaction 记录就做一次替换 —— **反复压缩也能正确还原**，因为重放等于把当时的
+压缩过程又走了一遍。
 
 ## 韧性与成本
 

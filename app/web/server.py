@@ -46,6 +46,7 @@ from app.events import Event
 from app.llm.client import LLMClient
 from app.memory import MemoryManager
 from app.memory.session_store import Session, SessionError, SessionStore
+from app.scheduler import Scheduler
 from app.tools import (
     Decision,
     PermissionGate,
@@ -337,6 +338,49 @@ def create_app(root: str | Path) -> FastAPI:
                 out.append({"role": "assistant", "text": message["content"]})
         return out
 
+    # live 在 chat() 里才存在，必须当参数传进来 —— 嵌套函数看不到调用方的局部变量
+    async def _consolidate_if_due(
+        queue: asyncio.Queue, live: LiveSession
+    ) -> None:
+        """该整理就整理，把过程也推给浏览器。
+
+        Scheduler 判断该不该跑，AutoDream 干活 —— 和 CLI 走的是同一套，
+        只是把结果从「打日志」换成了「发事件」。整理失败绝不能影响
+        已经发出的答案，所以整段包在 try 里。
+        """
+        settings = get_settings()
+        scheduler = Scheduler(
+            project_root,
+            min_hours=settings.consolidate_min_hours,
+            min_sessions=settings.consolidate_min_sessions,
+        )
+        decision = scheduler.check()
+        if not decision.should_run:
+            logger.info("不整理记忆：%s", decision.reason)
+            return
+
+        queue.put_nowait(Event("memory", {"status": "running", "reason": decision.reason}))
+        try:
+            # 用会话自己的 client：AutoDream 的开销也算进这次的账单里，
+            # 不然它的花费会凭空消失
+            result = await scheduler.consolidate(live.llm, force=False)
+        except Exception as e:  # noqa: BLE001 —— 整理是「顺带做的事」
+            logger.exception("记忆整理出错")
+            queue.put_nowait(Event("memory", {"status": "failed", "message": str(e)}))
+            return
+
+        queue.put_nowait(
+            Event(
+                "memory",
+                {
+                    "status": "done",
+                    "summary": result.summary,
+                    "changed": result.changed,
+                    "sessions_used": result.sessions_used,
+                },
+            )
+        )
+
     # ---------------------------------------------------------- 对话
 
     @app.post("/api/chat")
@@ -362,6 +406,9 @@ def create_app(root: str | Path) -> FastAPI:
                         },
                     )
                 )
+                # 整理放在最后：**先让用户拿到答案**。它可能跑几十秒，
+                # 挡在答案前面没人受得了
+                await _consolidate_if_due(queue, live)
             except MaxIterationError as e:
                 queue.put_nowait(
                     Event("error", {"message": str(e), "partial": e.partial})

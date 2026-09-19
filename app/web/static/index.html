@@ -759,6 +759,27 @@ function addPermission(data) {
   scrollDown();
 }
 
+function addMemory(data) {
+  if (data.status === "running") {
+    log.append(el("div", "meta", `记忆整理中…（${data.reason}）`));
+  } else if (data.status === "done") {
+    const line = data.changed.length
+      ? `记忆已整理 · ${data.sessions_used} 个会话 · 改动 ${data.changed.length} 条：${data.changed.join(", ")}`
+      : `记忆已整理 · ${data.sessions_used} 个会话 · 没有值得长期保存的新信息`;
+    log.append(el("div", "meta", line));
+    if (data.summary) {
+      const box = el("div", "note");
+      box.style.borderLeftColor = "var(--accent)";
+      box.style.background = "var(--grad-bubble)";
+      box.append(el("div", null, "AutoDream：" + data.summary));
+      log.append(box);
+    }
+  } else {
+    log.append(el("div", "meta", "记忆整理失败：" + (data.message || "")));
+  }
+  scrollDown();
+}
+
 function addError(data) {
   const box = el("div", "note");
   box.append(el("div", null, "出错了：" + data.message));
@@ -838,6 +859,7 @@ function handleEvent(type, data) {
     case "done":
       addMeta(`完成 · ${humanTokens(data.total_tokens)} tokens · ${data.calls} 次调用`);
       break;
+    case "memory": addMemory(data); break;
   }
 }
 

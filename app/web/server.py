@@ -36,6 +36,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from app.agent.main_agent import MainAgent
@@ -260,6 +261,8 @@ def create_app(root: str | Path) -> FastAPI:
         return live
 
     # ---------------------------------------------------------- 页面
+
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/")
     async def index() -> FileResponse:

@@ -105,7 +105,47 @@
     color: var(--dim); font-size: 12px; margin: 14px 0 8px;
   }
   .step-line::after { content: ""; flex: 1; height: 1px; background: var(--border); }
-  .text-out { white-space: pre-wrap; word-break: break-word; margin: 8px 0; }
+  /* 模型输出按 Markdown 渲染。注意这里**不能**用 white-space: pre-wrap ——
+     换行由渲染器产生的 <br> / 块级元素负责，两者叠加会多出一倍空行 */
+  .text-out { word-break: break-word; margin: 8px 0; }
+  .text-out > :first-child { margin-top: 0; }
+  .text-out > :last-child { margin-bottom: 0; }
+  .text-out p { margin: 8px 0; }
+  .text-out h1, .text-out h2, .text-out h3,
+  .text-out h4, .text-out h5, .text-out h6 {
+    margin: 18px 0 8px; line-height: 1.3;
+  }
+  .text-out h1 { font-size: 1.4em; }
+  .text-out h2 { font-size: 1.22em; }
+  .text-out h3 { font-size: 1.1em; }
+  .text-out h4, .text-out h5, .text-out h6 { font-size: 1em; }
+  .text-out ul, .text-out ol { margin: 8px 0; padding-left: 24px; }
+  .text-out li { margin: 3px 0; }
+  .text-out blockquote {
+    margin: 10px 0; padding: 2px 12px; border-left: 3px solid var(--border);
+    color: var(--dim);
+  }
+  .text-out a { color: var(--accent); }
+  .text-out hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  .text-out code {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 5px; font-size: .89em;
+  }
+  .text-out pre {
+    position: relative; margin: 10px 0; padding: 12px 14px; overflow: auto;
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .text-out pre code {
+    background: none; border: none; padding: 0; font-size: 12.5px; line-height: 1.55;
+  }
+  .text-out pre .lang {
+    position: absolute; top: 6px; right: 62px; color: var(--dim); font-size: 11px;
+  }
+  .text-out pre .copy {
+    position: absolute; top: 4px; right: 6px; font-size: 11px; padding: 2px 8px;
+    opacity: 0; transition: opacity .12s;
+  }
+  .text-out pre:hover .copy { opacity: 1; }
 
   .tool {
     border: 1px solid var(--border); border-radius: 8px; margin: 6px 0;
@@ -266,6 +306,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="/static/markdown.js"></script>
 <script>
 "use strict";
 
@@ -311,13 +352,33 @@ function toast(msg) {
   el._t = setTimeout(() => el.classList.remove("show"), 2600);
 }
 
-/** 一律 textContent，不拼 innerHTML —— 模型输出和工具结果都是不可信内容。 */
+/** 建元素。默认用 textContent —— 模型输出和工具结果都是不可信内容。
+ *  只有渲染 Markdown 时才用 innerHTML，而那条路上的内容是先转义过的。 */
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
 }
+
+/** 边流边渲染。
+ *  每来一小段就整体重解析是 O(n²)，但单条回复通常只有几 KB，无所谓。
+ *  真要慢下来再加节流，不提前优化。 */
+function setRichText(node, raw) {
+  node._raw = raw;
+  node.innerHTML = renderMarkdown(raw);
+}
+
+// 代码块的「复制」按钮：从答案里拷代码是最高频的动作
+log.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-copy]");
+  if (!btn) return;
+  const code = btn.closest("pre").querySelector("code");
+  navigator.clipboard.writeText(code.textContent).then(
+    () => { btn.textContent = "已复制"; setTimeout(() => (btn.textContent = "复制"), 1200); },
+    () => toast("复制失败，手动选一下吧"),
+  );
+});
 
 const scrollDown = () => { $("main").scrollTop = $("main").scrollHeight; };
 
@@ -398,7 +459,9 @@ async function switchTo(sessionId) {
       if (m.role === "user") addUser(m.text);
       else {
         const block = el("div", "step-block");
-        block.append(el("div", "text-out", m.text));
+        const out = el("div", "text-out");
+        setRichText(out, m.text);   // 历史消息也要按 Markdown 渲染
+        block.append(out);
         log.append(block);
         state.stepBlock = block;
       }
@@ -450,7 +513,9 @@ function currentOut() {
 
 function addDelta(text) {
   const out = currentOut();
-  if (out) { out.textContent += text; scrollDown(); }
+  if (!out) return;
+  setRichText(out, (out._raw || "") + text);
+  scrollDown();
 }
 
 function addToolCall(data) {

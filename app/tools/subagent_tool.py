@@ -134,9 +134,11 @@ class SubAgentTool(SandboxedTool):
     risk = "read"
     description = (
         "派一个子 Agent 去独立完成一项任务，只把最终结论带回来。"
-        "适合「需要翻很多文件才能回答」或「改动较多需要反复验证」的任务 —— "
-        "子 Agent 的中间过程不会占用你的上下文。"
-        "缺点是你只拿到结论，看不到它的推理过程，所以任务描述要写清楚。"
+        "**需要打开 3 个以上文件才能回答的问题，优先用它** —— "
+        "你读过的文件会一直占着你的上下文，子 Agent 读多少都只还你一段结论。"
+        "agent_type: Explore 查代码在哪/怎么组织；Plan 出改动方案；"
+        "General-Purpose 改代码并验证。"
+        "代价是你只拿到结论、看不到它的推理过程，所以 task 要写清楚。"
     )
     params_model = _SubAgentParams
 

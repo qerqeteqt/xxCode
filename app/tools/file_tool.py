@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.tools.base import SandboxedTool, ToolError, ToolResult
 from app.tools.sandbox import Sandbox
-from app.tools.text import decode_bytes
+from app.tools.text import decode_bytes, human_size
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,8 @@ def _read_text(sandbox: Sandbox, target: Path) -> str:
 
     size = target.stat().st_size
     if size > MAX_FILE_BYTES:
-        limit_mb = MAX_FILE_BYTES // 1024 // 1024
         raise ToolError(
-            f"{display} 太大（{size / 1024 / 1024:.1f} MB，上限 {limit_mb} MB），拒绝读取"
+            f"{display} 太大（{human_size(size)}，上限 {human_size(MAX_FILE_BYTES)}），拒绝读取"
         )
 
     return decode_bytes(target.read_bytes())

@@ -1,0 +1,30 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# ---- 虚拟环境 ----
+# 本项目使用 conda 环境 langgraph，不在此目录内，这里只是防止误提交
+.venv/
+venv/
+env/
+
+# ---- IDE ----
+.idea/
+.vscode/
+
+# ---- 密钥 ----
+# .env 存放真实 API Key，永不入库
+.env
+.env.local
+.env.*.local
+
+# ---- Agent Runtime 运行数据 ----
+# sessions 是运行时产生的对话流水，属于本机数据，不入库
+.agent/sessions/
+# 注意：.agent/memory/ 下的 Markdown 是长期知识，需要入库，故不在此忽略

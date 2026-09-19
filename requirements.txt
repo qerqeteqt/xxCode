@@ -1,0 +1,5 @@
+# 运行依赖。当前 conda 环境 langgraph 已全部具备，此文件用于环境复现。
+pydantic>=2.12
+pydantic-settings>=2.12
+python-dotenv>=1.2
+httpx>=0.28

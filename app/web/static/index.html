@@ -12,7 +12,11 @@
     --border: #30363d; --text: #e6edf3; --dim: #8b949e;
     --accent: #58a6ff; --accent-fg: #0d1117; --accent-soft: rgba(88,166,255,.14);
     --ok: #3fb950; --warn: #d29922; --err: #f85149;
-    --code-bg: #010409;
+    /* 代码色。刻意**不往纯黑走** —— 纯黑在深色页面上像一块洞，和正文的对比
+       也太强，眼睛来回跳。带一点蓝、比面板略深一点就够区分了 */
+    --code-bg: #121b2a;
+    --code-border: #263041;
+    --grad-code: linear-gradient(180deg, #101a29 0%, #0b1320 100%);
     /* 渐变单独一组。所有渐变都从这里取，换个主题就是换一组值 ——
        和颜色变量是同一个道理，组件里不出现写死的渐变色 */
     --glow-1: rgba(88,166,255,.13);
@@ -29,7 +33,9 @@
     --border: #d0d7de; --text: #1f2328; --dim: #656d76;
     --accent: #0969da; --accent-fg: #ffffff; --accent-soft: rgba(9,105,218,.10);
     --ok: #1a7f37; --warn: #9a6700; --err: #cf222e;
-    --code-bg: #f6f8fa;
+    --code-bg: #eef3fb;
+    --code-border: #d8e2f0;
+    --grad-code: linear-gradient(180deg, #f3f7ff 0%, #e9f0fa 100%);
     --glow-1: rgba(9,105,218,.07);
     --glow-2: rgba(130,80,223,.06);
     --grad-brand: linear-gradient(118deg, #0969da 0%, #8250df 100%);
@@ -200,12 +206,13 @@
   .text-out a { color: var(--accent); }
   .text-out hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
   .text-out code {
-    background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px;
-    padding: 1px 5px; font-size: .89em;
+    background: var(--code-bg); border: 1px solid var(--code-border);
+    border-radius: 4px; padding: 1px 5px; font-size: .89em;
   }
   .text-out pre {
     position: relative; margin: 10px 0; padding: 12px 14px; overflow: auto;
-    background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    background: var(--code-bg); background-image: var(--grad-code);
+    border: 1px solid var(--code-border); border-radius: 8px;
   }
   .text-out pre code {
     background: none; border: none; padding: 0; font-size: 12.5px; line-height: 1.55;
@@ -238,7 +245,8 @@
   .tool .state { font-size: 11px; }
   .tool pre {
     margin: 0; padding: 10px 12px; border-top: 1px solid var(--border);
-    background: var(--code-bg); font-size: 12px; line-height: 1.5;
+    background: var(--code-bg); background-image: var(--grad-code);
+    font-size: 12px; line-height: 1.5;
     max-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;
   }
   .ok { color: var(--ok); } .fail { color: var(--err); } .run { color: var(--warn); }

@@ -442,9 +442,26 @@ python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 
 ## 网页界面
 
+**最省事的方式：双击 `web.cmd`。** 它替你做了三件事 —— 切到项目目录、
+找到对的那个 Python、起服务并自动打开浏览器。不用 `conda activate`、
+不用 `cd`、不用记参数。
+
+想放桌面或任务栏：右键 `web.cmd` → 发送到 → 桌面快捷方式。
+
+也可以走命令行：
+
 ```bash
-python main.py --web          # 打开 http://127.0.0.1:8000
+python main.py --web                    # http://127.0.0.1:8000
+python main.py --web --no-browser        # 不自动开浏览器
+python main.py --web --port 9000         # 换个端口
 ```
+
+**只有一个进程。** uvicorn（FastAPI 自带的服务器）同时负责 API、SSE、
+以及把 `index.html` 发出去 —— 没有前端构建、没有 npm、没有第二个进程要开。
+`Ctrl+C` 就是停止。
+
+**改完代码要重启**（没开热重载）。这一路被这个坑过两次：浏览器连的其实
+是旧进程，于是「明明改了却没生效」，还容易误判成代码的问题。
 
 左侧是会话历史，点一条就切过去（和 ChatGPT 一样）。深色/浅色可切，
     左下角 ⚙ 里能改配置。

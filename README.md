@@ -22,10 +22,10 @@
 
 ```
 app/
-  agent/      main_agent.py  react_loop.py
+  agent/      main_agent.py  react_loop.py  subagent.py
   llm/        client.py
   tools/      base.py  registry.py  sandbox.py  text.py
-              file_tool.py  bash_tool.py  search_tool.py
+              file_tool.py  bash_tool.py  search_tool.py  subagent_tool.py
 .agent/
   memory/     MEMORY.md  project.md  preferences.md
               architecture.md  lessons.md
@@ -49,18 +49,49 @@ pytest.ini
 - **AutoDream 不是 Tool**：它由 Scheduler 在后台触发，生命周期独立于 Main Agent 的循环，
   因此不注册进 ToolRegistry。
 - **ReAct Loop 不认识具体 Tool**：循环通过注入的 `execute_tool` 调用工具，
-  Phase 2 接上 ToolRegistry 时循环代码一行未改。
+  Phase 2 接上 ToolRegistry 时循环代码一行未改；Phase 3 的 SubAgent 复用的也是同一个循环。
 - **路径沙箱**：所有文件类工具的路径统一经 `Sandbox.resolve()` 解析 ——
   先 resolve 成真实绝对路径（展开 `..` 和符号链接），再判断是否仍在 root 内。
   它既是安全边界，也是「这次让 agent 看哪个项目」的开关。
+- **权限靠「能力不存在」实现，不靠 prompt 自律**：只读的 SubAgent 拿不到写类工具，
+  子 Agent 的工具集里没有 `SubAgent`。这是事实约束，不是请求模型配合。
 - **文件型 Persistence**：Store 实现可替换，未来换数据库不触碰 Runtime 核心逻辑。
+
+## SubAgent
+
+Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配置
+（`app/agent/subagent.py`）：
+
+| 规格 | 工具集 | 产出 |
+|---|---|---|
+| `Explore` | `Read` `List` `Glob` `Grep` | 事实：代码在哪、怎么组织的 |
+| `Plan` | 同上（差别只在 system prompt） | 方案：分几步改、风险在哪 |
+| `General-Purpose` | 全部（含 `Write` `Edit` `Bash`） | 结果：改了什么、验证过没有 |
+
+`Bash` 不在只读工具集里 —— 它「常用作只读」不等于「只能只读」，权限按最大能力算。
+
+三条结构性保证：
+
+1. **工具集裁剪**：子 Agent 的能力边界在注册表这一层被切干净，它连 `Write` 存在都不知道。
+2. **Context 隔离**：子 Agent 的 messages 从零构造，只有 `system` + `user` 两条，
+   不含 Main 的历史。代价是 Main 必须把关键信息显式写进 `context` 参数。
+3. **递归禁止**：子 Agent 的工具集里没有 `SubAgentTool`，靠能力缺失而不是深度计数。
+
+返回值带元信息，让 Main 不必猜：
+
+```
+[General-Purpose 完成 | 7 步 | 修改: app/auth/login.py, tests/test_login.py]
+```
+
+改动清单来自**工具调用记录**（`Write`/`Edit` 实际成功了几次），不是让模型自己总结 ——
+模型会漏、会把「打算改」说成「已经改」。
 
 ## 开发进度
 
 - [x] Phase 0 — 仓库脚手架
 - [x] Phase 1 — LLM Client → Agent → ReAct Loop
 - [x] Phase 2 — Tool 抽象 → ToolRegistry → FileTool / BashTool / SearchTool
-- [ ] Phase 3 — SubAgent Runtime → Explore / Plan / General-Purpose → SubAgentTool
+- [x] Phase 3 — SubAgent Runtime → Explore / Plan / General-Purpose → SubAgentTool
 - [ ] Phase 4 — State → JSONL Session Store
 - [ ] Phase 5 — MemoryManager → MEMORY.md → Markdown Memory
 - [ ] Phase 6 — Scheduler → AutoDream → Memory Consolidation
@@ -85,7 +116,7 @@ cp .env.example .env   # 然后填入真实的 LLM_API_KEY
 
 ## 已注册的工具
 
-由 `build_default_registry(root)` 集中装配，全部共用同一个 `Sandbox(root)`：
+由 `build_default_registry(root, llm=None)` 集中装配，全部共用同一个 `Sandbox(root)`：
 
 | 工具 | 用途 |
 |---|---|
@@ -96,6 +127,7 @@ cp .env.example .env   # 然后填入真实的 LLM_API_KEY
 | `Glob` | 按文件名 glob 模式查找文件 |
 | `Grep` | 按内容正则搜索，返回 `文件:行号: 那一行` |
 | `Bash` | 在项目根目录执行命令，返回 exit code / stdout / stderr |
+| `SubAgent` | 派一个子 Agent 独立完成任务，只带回结论（需要 `llm` 才会注册） |
 
 `ToolRegistry.execute()` 的契约是**永不抛异常** —— 工具名不存在、`arguments` 不是合法
 JSON、参数不符合 schema、工具自身执行失败，四种情况都会转成一条模型看得懂的消息回灌，

@@ -21,10 +21,6 @@ logger = logging.getLogger("xxcode")
 
 async def _run(question: str, root: Path) -> str:
     settings = get_settings()
-    registry = build_default_registry(root)
-
-    logger.info("项目 root: %s", root)
-    logger.info("已注册工具: %s", ", ".join(t.name for t in registry.list_tools()))
 
     # LLMClient 实现了 async 上下文管理器，退出时自动关掉连接池
     async with LLMClient(
@@ -33,6 +29,12 @@ async def _run(question: str, root: Path) -> str:
         model=settings.llm_model,
         timeout=settings.llm_timeout,
     ) as llm:
+        # registry 要在 llm 之后建：SubAgentTool 需要 llm 才能驱动子循环
+        registry = build_default_registry(root, llm=llm)
+
+        logger.info("项目 root: %s", root)
+        logger.info("已注册工具: %s", ", ".join(t.name for t in registry.list_tools()))
+
         agent = MainAgent(llm=llm, registry=registry, max_steps=settings.max_steps)
         return await agent.run(question)
 

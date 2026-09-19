@@ -26,6 +26,12 @@ DEFAULT_READ_LINES = 2000
 MAX_READ_LINES = 5000
 MAX_LIST_ENTRIES = 500
 
+# 写类工具**成功**时返回文本的前缀。
+# 单独提出来是因为 SubAgentTool 要靠它判断「这次写入到底成没成功」，才能给出准确的
+# 改动清单 —— 把「尝试过但失败了」误报成「已修改」，会让 Main Agent 向用户传达错误
+# 信息。改下面三个工具的返回文案时，记得这里是被引用的。
+WRITE_SUCCESS_PREFIXES = ("已新建", "已覆盖", "已修改")
+
 
 def _read_text(sandbox: Sandbox, target: Path) -> str:
     """读文件内容，三种常见失败给出模型能自救的提示。"""

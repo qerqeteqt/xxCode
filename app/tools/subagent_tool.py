@@ -12,6 +12,7 @@
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +25,9 @@ from app.tools.file_tool import EditTool, ListTool, ReadTool, WriteTool
 from app.tools.registry import ToolRegistry, TrackingRegistry
 from app.tools.sandbox import Sandbox
 from app.tools.search_tool import GlobTool, GrepTool
+
+if TYPE_CHECKING:
+    from app.tools.permission import PermissionGate
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,9 @@ class _SubAgentParams(BaseModel):
 
 class SubAgentTool(SandboxedTool):
     name = "SubAgent"
+    # 标 read 而不是 execute：子 Agent 内部每一次写/执行都会拿到**同一份**
+    # 会话放行记录、走同一个闸门。在这里再问一遍是重复的 —— 用户会被问两次
+    risk = "read"
     description = (
         "派一个子 Agent 去独立完成一项任务，只把最终结论带回来。"
         "适合「需要翻很多文件才能回答」或「改动较多需要反复验证」的任务 —— "
@@ -145,9 +152,15 @@ class SubAgentTool(SandboxedTool):
     )
     params_model = _SubAgentParams
 
-    def __init__(self, sandbox: Sandbox, llm: LLMClient) -> None:
+    def __init__(
+        self,
+        sandbox: Sandbox,
+        llm: LLMClient,
+        gate: "PermissionGate | None" = None,
+    ) -> None:
         super().__init__(sandbox)
         self._llm = llm
+        self._gate = gate
 
     async def execute(
         self, agent_type: AgentType, task: str, context: str | None
@@ -167,7 +180,11 @@ class SubAgentTool(SandboxedTool):
             {"role": "user", "content": _compose_task(task, context)},
         ]
 
-        registry = TrackingRegistry()
+        # 子 Agent 内部每一次写/执行都要过闸门 —— 否则 General-Purpose 就是
+        # 绕开权限的后门。用 with_source 而不是新建一个：共享同一份会话放行记录，
+        # 只是把来源标出来，让用户知道这条确认是哪来的
+        sub_gate = self._gate.with_source(f"SubAgent: {agent_type}") if self._gate else None
+        registry = TrackingRegistry(gate=sub_gate)
         for tool in _allowed_tools(spec, self.sandbox):
             registry.register(tool)
 

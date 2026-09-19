@@ -16,10 +16,14 @@ execute_detailed() 返回 ToolResult，给 Runtime 自己用（累计 files_chan
 import json
 import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
 from app.tools.base import Tool, ToolError, ToolResult
+
+if TYPE_CHECKING:
+    from app.tools.permission import PermissionGate
 
 # 是拿到一个 logger 实例 ,打印日志的
 logger = logging.getLogger(__name__)
@@ -29,9 +33,12 @@ _RAW_ARGS_PREVIEW = 200
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(self, gate: "PermissionGate | None" = None) -> None:
         # 也就是工具的名称 + 工具本身
         self._tools: dict[str, Tool] = {}
+        # 权限闸门。**可选** —— 不挂闸门就是「没有权限系统」的形态。
+        # AutoDream 的注册表就不挂：它只能碰记忆，而且跑在后台、常常没人可问
+        self._gate = gate
 
     # ---------- 增删查 ----------
 
@@ -107,6 +114,14 @@ class ToolRegistry:
             )
             return ToolResult(f"参数不合法 —— {detail}", ok=False)
 
+        # 权限检查放在参数校验**之后**：规则要匹配的是解析出来的 subject
+        # （路径、命令），拿原始 JSON 字符串去匹配既不可靠也不好写规则
+        if self._gate is not None:
+            outcome = await self._gate.check(tool, tool.subject(params))
+            if not outcome.allowed:
+                logger.info("[perm] 拒绝 %s", name)
+                return ToolResult(outcome.message or f"{name} 被权限规则拒绝", ok=False)
+
         logger.info("[tool] %s(%s)", name, raw_args[:_RAW_ARGS_PREVIEW])
         try:
             result = await tool.execute(**params.model_dump())
@@ -134,8 +149,12 @@ class TrackingRegistry(ToolRegistry):
     被字符串化丢掉了。现在它只是读 result.changed_path 一个字段。
     """
 
-    def __init__(self, on_change: Callable[[str], None] | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        on_change: Callable[[str], None] | None = None,
+        gate: "PermissionGate | None" = None,
+    ) -> None:
+        super().__init__(gate=gate)
         self.changed_files: list[str] = []
         self._on_change = on_change
 

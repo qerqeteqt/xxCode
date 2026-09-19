@@ -62,11 +62,15 @@ class ReadParams(BaseModel):
 
 class ReadTool(SandboxedTool):
     name = "Read"
+    risk = "read"
     description = (
         "读取项目内某个文件的内容，返回带行号的文本。"
         "文件很大时用 offset/limit 分段读取，不要试图一次读完。"
     )
     params_model = ReadParams
+
+    def subject(self, params: ReadParams) -> str:
+        return params.path
 
     async def execute(self, path: str, offset: int, limit: int) -> ToolResult:
         target = self.sandbox.resolve(path)
@@ -99,11 +103,15 @@ class WriteParams(BaseModel):
 
 class WriteTool(SandboxedTool):
     name = "Write"
+    risk = "write"
     description = (
         "把内容整体写入文件，文件已存在则覆盖，父目录不存在会自动创建。"
         "只改局部内容请用 Edit，避免覆盖掉你没读到的部分。"
     )
     params_model = WriteParams
+
+    def subject(self, params: WriteParams) -> str:
+        return params.path
 
     async def execute(self, path: str, content: str) -> ToolResult:
         target = self.sandbox.resolve(path)
@@ -135,11 +143,15 @@ class EditParams(BaseModel):
 
 class EditTool(SandboxedTool):
     name = "Edit"
+    risk = "write"
     description = (
         "在文件里做精确字符串替换。old_string 必须在文件中恰好出现一次，"
         "否则拒绝执行 —— 多带几行上下文可以让它唯一。"
     )
     params_model = EditParams
+
+    def subject(self, params: EditParams) -> str:
+        return params.path
 
     async def execute(self, path: str, old_string: str, new_string: str) -> ToolResult:
         target = self.sandbox.resolve(path)
@@ -180,11 +192,15 @@ class ListParams(BaseModel):
 
 class ListTool(SandboxedTool):
     name = "List"
+    risk = "read"
     description = (
         "递归列出目录下的所有文件和子目录，自动跳过 .git / .venv / __pycache__ 等。"
         "用来快速了解项目结构，比一个个 Read 高效得多。"
     )
     params_model = ListParams
+
+    def subject(self, params: ListParams) -> str:
+        return params.path
 
     async def execute(self, path: str) -> ToolResult:
         base = self.sandbox.resolve(path)

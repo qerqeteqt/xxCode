@@ -12,6 +12,12 @@ from app.llm.client import LLMClient
 from app.tools.base import SandboxedTool, Tool, ToolError, ToolResult
 from app.tools.bash_tool import BashTool
 from app.tools.file_tool import EditTool, ListTool, ReadTool, WriteTool
+from app.tools.permission import (
+    Decision,
+    PermissionGate,
+    PermissionOutcome,
+    PermissionRequest,
+)
 from app.tools.registry import ToolRegistry, TrackingRegistry
 from app.tools.sandbox import PathOutOfSandboxError, Sandbox
 from app.tools.search_tool import GlobTool, GrepTool
@@ -19,11 +25,15 @@ from app.tools.subagent_tool import SubAgentTool, build_sub_registry
 
 __all__ = [
     "BashTool",
+    "Decision",
     "EditTool",
     "GlobTool",
     "GrepTool",
     "ListTool",
     "PathOutOfSandboxError",
+    "PermissionGate",
+    "PermissionOutcome",
+    "PermissionRequest",
     "ReadTool",
     "Sandbox",
     "SandboxedTool",
@@ -43,6 +53,7 @@ def build_default_registry(
     root: str | Path,
     llm: LLMClient | None = None,
     on_file_changed: Callable[[str], None] | None = None,
+    gate: PermissionGate | None = None,
 ) -> ToolRegistry:
     """按项目根目录装配一整套工具。
 
@@ -58,7 +69,7 @@ def build_default_registry(
     工具层不该知道会话的存在。
     """
     sandbox = Sandbox(root)
-    registry = TrackingRegistry(on_change=on_file_changed)
+    registry = TrackingRegistry(on_change=on_file_changed, gate=gate)
     for tool in (
         ReadTool(sandbox),
         WriteTool(sandbox),
@@ -71,6 +82,6 @@ def build_default_registry(
         registry.register(tool)
 
     if llm is not None:
-        registry.register(SubAgentTool(sandbox, llm))
+        registry.register(SubAgentTool(sandbox, llm, gate=gate))
 
     return registry

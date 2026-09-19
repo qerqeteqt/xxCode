@@ -28,14 +28,54 @@ from app.llm.client import LLMClient, human_tokens
 from app.memory import MemoryManager
 from app.memory.session_store import SessionError, SessionStore
 from app.scheduler import Scheduler
-from app.tools import build_default_registry
+from app.tools import (
+    Decision,
+    PermissionGate,
+    PermissionRequest,
+    build_default_registry,
+)
 from config.settings import get_settings
 
 logger = logging.getLogger("xxcode")
 
 
+async def _ask_permission(request: PermissionRequest) -> Decision:
+    """终端上问一句。
+
+    `input()` 是阻塞的，直接调会把事件循环连同日志一起卡住，所以丢进线程跑。
+    """
+    options = (
+        "  (y) 允许这一次\n"
+        f"  (a) 本会话内允许所有「{request.risk}」类操作\n"
+        "  (n) 拒绝 —— 会把原因回灌给模型，让它换个做法\n"
+    )
+    prompt = f"\n[权限] Agent 想{request.summary}\n{options}选择 [n]: "
+    try:
+        answer = (await asyncio.to_thread(input, prompt)).strip().lower()
+    except EOFError:
+        # 标准输入不是终端（管道、重定向）时 input() 抛这个。
+        # 没人可问 = 拒绝，和闸门自己的默认保持一致
+        print("\n[权限] 读不到输入，按拒绝处理。要用脚本跑请加 --yes", file=sys.stderr)
+        return Decision.DENY
+
+    if answer.startswith("y"):
+        return Decision.ALLOW_ONCE
+    if answer.startswith("a"):
+        return Decision.ALLOW_SESSION
+    return Decision.DENY
+
+
+async def _always_allow(request: PermissionRequest) -> Decision:  # noqa: ARG001
+    """`--yes` 用的确认器：一律放行。"""
+    return Decision.ALLOW_SESSION
+
+
 async def _run_session(
-    question: str, root: Path, session_ref: str | None, resume: bool
+    question: str,
+    root: Path,
+    session_ref: str | None,
+    resume: bool,
+    assume_yes: bool = False,
 ) -> str:
     settings = get_settings()
     store = SessionStore(root)
@@ -54,10 +94,16 @@ async def _run_session(
         else:
             session = store.create()
 
+        # 权限闸门。会话内的放行记录只活在内存里 —— 一次手滑选了「永久允许」
+        # 就跟着项目走了，而你多半不记得自己什么时候做的决定
+        gate = PermissionGate.for_project(
+            root, confirmer=_always_allow if assume_yes else _ask_permission
+        )
+
         # registry 要在 llm 之后建：SubAgentTool 需要 llm 才能驱动子循环。
         # on_file_changed 让文件真被改动时立刻落进 State，而不是等任务结束再补。
         registry = build_default_registry(
-            root, llm=llm, on_file_changed=session.add_changed_file
+            root, llm=llm, on_file_changed=session.add_changed_file, gate=gate
         )
 
         # 启动时重建一次索引：索引是派生数据，这样永远和目录里的文件一致，
@@ -196,6 +242,12 @@ def main() -> None:
         action="store_true",
         help="本次会话结束后不检查记忆整理",
     )
+    parser.add_argument(
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="跳过权限确认，全部放行（给脚本用。交互使用时别加，那就等于没有权限系统）",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -222,7 +274,9 @@ def main() -> None:
     question = args.question or "用一句话解释 ReAct 是什么"
 
     try:
-        answer = asyncio.run(_run_session(question, root, args.session, args.resume))
+        answer = asyncio.run(
+            _run_session(question, root, args.session, args.resume, args.assume_yes)
+        )
     except SessionError as e:
         # 会话相关的失败（找不到、前缀不唯一、root 对不上）是用户能自己修的问题，
         # 不该甩一段 traceback 出来

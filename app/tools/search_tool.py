@@ -54,11 +54,15 @@ class GlobParams(BaseModel):
 
 class GlobTool(SandboxedTool):
     name = "Glob"
+    risk = "read"
     description = (
         "按文件名模式查找文件，返回路径列表。"
         "适合回答「项目里有哪些测试文件」「入口文件在哪」这类问题。"
     )
     params_model = GlobParams
+
+    def subject(self, params: GlobParams) -> str:
+        return params.path
 
     async def execute(self, pattern: str, path: str) -> ToolResult:
         base = self.sandbox.resolve(path)
@@ -98,11 +102,17 @@ class GrepParams(BaseModel):
 
 class GrepTool(SandboxedTool):
     name = "Grep"
+    risk = "read"
     description = (
         "按内容正则搜索，返回「文件:行号: 那一行」。"
         "这是定位代码最有效的工具 —— 想改什么，先用它找到在哪个文件。"
     )
     params_model = GrepParams
+
+    def subject(self, params: GrepParams) -> str:
+        # 只报搜索根目录。**敏感文件是靠遍历时直接跳过挡住的**（见 sandbox.py），
+        # 不是靠这里 —— 路径规则没法表达「这次搜索会扫到哪些文件」
+        return params.path
 
     async def execute(self, pattern: str, path: str, include: str | None) -> ToolResult:
         try:

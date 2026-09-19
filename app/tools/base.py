@@ -64,6 +64,22 @@ class Tool(ABC):
     description: ClassVar[str]
     params_model: ClassVar[type[BaseModel]]
 
+    # 这个工具能造成多大的影响，权限闸门按它决定默认策略。
+    #
+    # 默认值是**最严格**的 execute，不是 read。理由：新工具忘了声明时，
+    # 结果是「被问一次」（立刻暴露），而不是「被静默放行」（永远不知道）。
+    # 安全相关的默认值必须往严的方向倒。
+    risk: ClassVar[str] = "execute"
+
+    def subject(self, params: BaseModel) -> str | None:
+        """这次调用作用的**对象** —— 路径、命令之类，供权限规则匹配。
+
+        默认没有。知道的工具自己声明 —— 把「哪个参数是敏感对象」留在工具里，
+        比让权限模块去猜每个工具的参数名可靠得多，也和 description/schema
+        一样属于「这个工具是什么」的静态事实。
+        """
+        return None
+
     def schema(self) -> dict:
         """转成 OpenAI function calling 的 tools 参数格式。"""
         return {

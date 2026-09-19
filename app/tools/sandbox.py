@@ -20,6 +20,8 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
+from app.tools.permission import SENSITIVE_PATTERNS, matches_any
+
 # 遍历时按**目录名**跳过的目录 —— 不管出现在哪一层都跳。
 # 为什么这件事非做不可：Grep 会走遍大量文件，如果连 .git（几千个二进制对象）
 # 和 .venv（几万个文件）都扫，一次搜索能跑几分钟，而且返回的全是乱码噪声。
@@ -119,4 +121,10 @@ class Sandbox:
                 d for d in dirnames if not self._should_skip_dir(current / d)
             ]
             for filename in filenames:
+                if matches_any(filename, SENSITIVE_PATTERNS):
+                    # 敏感文件在**遍历层**就被摘掉，而不是靠权限规则事后拦。
+                    # 因为规则没法表达「这次 Grep 会扫到哪些文件」—— 搜索是遍历整个
+                    # 目录树的，等结果回来再过滤，内容早就进了 Context。
+                    # 这里是「能力不存在」，比「请求配合」硬。
+                    continue
                 yield current / filename

@@ -206,7 +206,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
 - [ ] Phase 7 — 完善（文档把它写成一个大清单，但一次做完就违反「不一次性实现全部模块」的原则，所以拆开推）
   - [x] 7a — Retry + Token Management
   - [x] 7b — Context Compaction
-  - [ ] 7c — Permission
+  - [x] 7c — Permission
   - [ ] 7d — Parallel SubAgent / Streaming / Web UI
 
 Logging 与 Async 在前六个阶段已经顺手做掉了：每个模块一个 logger；从 Phase 1 起就是
@@ -250,6 +250,68 @@ JSON、参数不符合 schema、工具自身执行失败，四种情况都会转
 
 Bash 的安全档位目前是「危险命令黑名单」，挡的是**误伤而非攻击者**；
 完整的权限系统（可配置策略 / 人工确认 / 容器隔离）属于 Phase 7。
+
+## 权限
+
+三道闸门，从硬到软：
+
+| | 机制 | 性质 |
+|---|---|---|
+| 一 | **能力裁剪** | 工具集里没有的就是没有（只读 SubAgent 拿不到 `Write`） |
+| 二 | **路径沙箱** | 到不了（路径必须落在 root 内） |
+| 三 | **权限闸门** | 到了也要过规则，必要时问你 |
+
+闸门的判定顺序**不能反**：
+
+```
+① allow 规则命中   → 放行      （显式放开，优先级最高）
+② deny 规则命中    → 拒绝      （敏感路径，硬拒，不问）
+③ 按工具的风险等级 → read 放行 / write·execute 问人
+```
+
+①在②前面是刻意的：`allow` 就是那条「我知道我在干什么」的逃生通道。否则你想让
+Agent 读一次 `.env` 就只能改源码。
+
+**风险等级由工具自己声明**（`Tool.risk`）。默认值是**最严格的 `execute`** ——
+新工具忘了声明时，结果是「被问一次」（立刻暴露），而不是「被静默放行」（永远不知道）。
+安全相关的默认值必须往严的方向倒。
+
+### 敏感文件默认拒绝
+
+```
+.env  .env.local  *.pem  *.key  *.p12  *.pfx  id_rsa*  id_ed25519*  .netrc  .npmrc
+```
+
+要放开就改 `.agent/permissions.json`：
+
+```json
+{
+  "deny":  ["secrets/**"],
+  "allow": [".env"]
+}
+```
+
+内置清单永远生效，文件里的 `deny` 追加在它之上，`allow` 能盖过它。
+
+**而且这些文件在遍历层就被摘掉了** —— `Grep` 搜不到、`Glob` 列不出来。
+这一条不能靠规则实现：规则没法表达「这次搜索会扫到哪些文件」，等结果回来再过滤，
+内容早就进了 Context。所以它走的是「能力不存在」那条路。
+
+### 关于 Bash，必须说清楚
+
+**Bash 不受沙箱管辖。** 它被原样交给操作系统，`cwd` 只是起点不是边界：
+
+```bash
+cd / && cat /etc/passwd      # 黑名单拦不住
+```
+
+黑名单挡的是**误伤而非攻击者**，而命令字符串不像路径那样容易被规则命中。
+真正的进程级隔离要靠容器 / seccomp / Windows Job Object，不是 V1 的事。
+**把一个不完整的边界说成完整的，比没有边界更糟** —— 所以这里写明白。
+
+同样要说明的是：闸门拦的是**工具调用，不是意图**。模型发现 `Write a.py` 被拒，
+理论上可以改写成 `Bash("echo ... > a.py")` 绕过去。纵深防御的每一层都不完美，
+闸门的价值在于降低误伤、降低对注意力的依赖，**不是「可以放心让它去跑别人的代码」**。
 
 ## 上下文压缩
 
@@ -313,6 +375,7 @@ python main.py --session e649 "接着问"                 # 续指定会话（�
 python main.py --list-sessions                         # 列出最近的会话
 python main.py --consolidate                           # 强制整理一次记忆后退出
 python main.py --no-consolidate "随便问问"              # 这次跑完不检查整理
+python main.py --yes "给脚本用"                         # 跳过权限确认（交互时别加）
 python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 ```
 

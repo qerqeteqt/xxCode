@@ -146,11 +146,18 @@ class BashParams(BaseModel):
 
 class BashTool(SandboxedTool):
     name = "Bash"
+    risk = "execute"
     description = (
         "在项目根目录下执行 shell 命令，返回 exit code、stdout 和 stderr。"
         "适合运行测试、构建、git 等操作。不要用它做能用 Read/Glob/Grep 完成的事。"
     )
     params_model = BashParams
+
+    def subject(self, params: BashParams) -> str:
+        # 命令字符串不同于路径，命中敏感规则的可靠性有限（`cat .env` 能被
+        # 通配符捞到，但换个写法就捞不到）。这里的定位是「让人看一眼」，
+        # 不是「挡住」—— 挡 Bash 得靠操作系统级隔离，不是规则
+        return params.command
 
     async def execute(self, command: str, timeout: float) -> ToolResult:
         reason = check_dangerous(command)

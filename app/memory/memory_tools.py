@@ -21,7 +21,13 @@ AutoDream 结束时就能报出「这次改动了哪几条记忆」，跟 SubAge
 
 from pydantic import BaseModel, Field
 
-from app.memory.memory_manager import DEFAULT_CATEGORY, Memory, MemoryManager, MemoryStoreError
+from app.memory.memory_manager import (
+    DEFAULT_CATEGORY,
+    MEMORY_DIR,
+    Memory,
+    MemoryManager,
+    MemoryStoreError,
+)
 from app.tools.base import Tool, ToolError, ToolResult
 from app.tools.registry import ToolRegistry
 
@@ -38,6 +44,10 @@ def _render(memory: Memory) -> str:
     return "\n".join(lines) + f"\n\n{memory.content}"
 
 
+class _KeyParams(BaseModel):
+    key: str = Field(description="记忆的文件名，不含 .md，例如 code-conventions")
+
+
 class _MemoryTool(Tool):
     """持有 MemoryManager 的工具基类。
 
@@ -48,16 +58,22 @@ class _MemoryTool(Tool):
     def __init__(self, memory: MemoryManager) -> None:
         self.memory = memory
 
+    def subject(self, params: _KeyParams) -> str:
+        """报出记忆文件的相对路径，好让权限规则能用路径模式表达。
+
+        AutoDream 的注册表不挂闸门（见 memory_registry 的注释），所以这里
+        平时不会被用到 —— 但工具该声明的东西还是要声明齐，
+        万一将来给别的场景复用了这份注册表，不至于漏掉。
+        """
+        return f"{MEMORY_DIR}/{params.key}.md"
+
 
 # ---------------------------------------------------------------- Read
 
 
-class _KeyParams(BaseModel):
-    key: str = Field(description="记忆的文件名，不含 .md，例如 code-conventions")
-
-
 class ReadMemoryTool(_MemoryTool):
     name = "ReadMemory"
+    risk = "read"
     description = "读取一条长期记忆的完整内容（含元信息）。key 就是它在索引里的文件名。"
     params_model = _KeyParams
 
@@ -88,6 +104,7 @@ class _WriteParams(BaseModel):
 
 class WriteMemoryTool(_MemoryTool):
     name = "WriteMemory"
+    risk = "write"
     description = (
         "新建一条记忆，或整体覆盖已有的。索引会自动更新。"
         "只想改正文、保留元信息的话用 UpdateMemory。"
@@ -111,13 +128,15 @@ class WriteMemoryTool(_MemoryTool):
 # ---------------------------------------------------------------- Update
 
 
-class _UpdateParams(BaseModel):
-    key: str = Field(description="要更新的记忆的 key")
+class _UpdateParams(_KeyParams):
+    # 继承 _KeyParams 而不是各写一遍 key：这样 _MemoryTool.subject 的签名
+    # 对四个工具都是准确的，不会出现「注解说是 A、实际传的是 B」
     content: str = Field(description="新的正文，会整体替换旧正文")
 
 
 class UpdateMemoryTool(_MemoryTool):
     name = "UpdateMemory"
+    risk = "write"
     description = "更新一条已有记忆的正文，保留它的显示名、描述和分类。"
     params_model = _UpdateParams
 
@@ -136,6 +155,7 @@ class UpdateMemoryTool(_MemoryTool):
 
 class DeleteMemoryTool(_MemoryTool):
     name = "DeleteMemory"
+    risk = "write"
     description = (
         "删除一条记忆。**只在它确实过时或被推翻时用** —— "
         "内容只是需要修正的话，用 UpdateMemory 更安全。"

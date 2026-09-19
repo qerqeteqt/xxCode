@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from app.agent.react_loop import MaxIterationError, run_react_loop
+from app.events import EventHook, tag_events
 from app.agent.subagent import AGENT_SPECS, AgentSpec, AgentType
 from app.llm.client import LLMClient, LLMError, TokenUsage, human_tokens
 from app.tools.base import SandboxedTool, ToolError, ToolResult
@@ -152,10 +153,12 @@ class SubAgentTool(SandboxedTool):
         sandbox: Sandbox,
         llm: LLMClient,
         gate: "PermissionGate | None" = None,
+        on_event: EventHook | None = None,
     ) -> None:
         super().__init__(sandbox)
         self._llm = llm
         self._gate = gate
+        self._on_event = on_event
 
     async def execute(
         self, agent_type: AgentType, task: str, context: str | None
@@ -178,8 +181,11 @@ class SubAgentTool(SandboxedTool):
         # 子 Agent 内部每一次写/执行都要过闸门 —— 否则 General-Purpose 就是
         # 绕开权限的后门。用 with_source 而不是新建一个：共享同一份会话放行记录，
         # 只是把来源标出来，让用户知道这条确认是哪来的
-        sub_gate = self._gate.with_source(f"SubAgent: {agent_type}") if self._gate else None
-        registry = TrackingRegistry(gate=sub_gate)
+        label = f"SubAgent: {agent_type}"
+        sub_gate = self._gate.with_source(label) if self._gate else None
+        registry = TrackingRegistry(
+            gate=sub_gate, on_event=tag_events(self._on_event, label)
+        )
         for tool in _allowed_tools(spec, self.sandbox):
             registry.register(tool)
 

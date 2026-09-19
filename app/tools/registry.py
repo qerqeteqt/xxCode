@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from app.events import TEXT_LIMIT, EventHook, emit
 from app.tools.base import Tool, ToolError, ToolResult
 
 if TYPE_CHECKING:
@@ -33,12 +34,18 @@ _RAW_ARGS_PREVIEW = 200
 
 
 class ToolRegistry:
-    def __init__(self, gate: "PermissionGate | None" = None) -> None:
+    def __init__(
+        self,
+        gate: "PermissionGate | None" = None,
+        on_event: EventHook | None = None,
+    ) -> None:
         # 也就是工具的名称 + 工具本身
         self._tools: dict[str, Tool] = {}
         # 权限闸门。**可选** —— 不挂闸门就是「没有权限系统」的形态。
         # AutoDream 的注册表就不挂：它只能碰记忆，而且跑在后台、常常没人可问
         self._gate = gate
+        # 事件出口。**可选** —— 不传就什么都不发，CLI 一行都不用改
+        self._on_event = on_event
 
     # ---------- 增删查 ----------
 
@@ -71,7 +78,36 @@ class ToolRegistry:
         return (await self.execute_detailed(tool_call)).text
 
     async def execute_detailed(self, tool_call: dict) -> ToolResult:
-        """执行一次 tool_call，返回结构化结果。
+        """执行一次 tool_call，返回结构化结果，并把这个过程发成事件。
+
+        事件在这里发是因为**只有这里同时知道调用和结果** —— 循环只知道模型
+        要调什么，工具自己不知道自己是被谁调的。包一层比在两处各发一半可靠。
+        """
+        function = tool_call.get("function") or {}
+        call_id = tool_call.get("id")
+        emit(
+            self._on_event,
+            "tool_call",
+            name=function.get("name", ""),
+            arguments=function.get("arguments") or "{}",
+            call_id=call_id,
+        )
+
+        result = await self._dispatch(tool_call)
+
+        emit(
+            self._on_event,
+            "tool_result",
+            name=function.get("name", ""),
+            ok=result.ok,
+            text=result.text[:TEXT_LIMIT],
+            truncated=len(result.text) > TEXT_LIMIT,
+            call_id=call_id,
+        )
+        return result
+
+    async def _dispatch(self, tool_call: dict) -> ToolResult:
+        """真正干活的那部分。
 
         四道关卡，每一道对应模型的一种典型错误：
             1. 工具名不存在      -> 模型记错了工具名
@@ -153,8 +189,9 @@ class TrackingRegistry(ToolRegistry):
         self,
         on_change: Callable[[str], None] | None = None,
         gate: "PermissionGate | None" = None,
+        on_event: EventHook | None = None,
     ) -> None:
-        super().__init__(gate=gate)
+        super().__init__(gate=gate, on_event=on_event)
         self.changed_files: list[str] = []
         self._on_change = on_change
 

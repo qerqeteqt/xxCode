@@ -203,6 +203,21 @@ async def _run_consolidation(root: Path, *, force: bool) -> None:
         print(f"[记忆整理] 改动: {', '.join(result.changed)}")
 
 
+def _serve(root: Path, port: int) -> None:
+    """起网页界面。
+
+    导入放在函数里：不用 Web 的时候没必要去 import fastapi/uvicorn
+    （它们比整个 Runtime 还重），而且模块级导入会让 CLI 启动多花时间。
+    """
+    import uvicorn
+
+    from app.web import create_app
+
+    logger.info("网页界面: http://127.0.0.1:%d", port)
+    logger.info("项目 root: %s", root)
+    uvicorn.run(create_app(root), host="127.0.0.1", port=port, log_level="warning")
+
+
 def _print_sessions(root: Path, limit: int) -> None:
     infos = SessionStore(root).list_sessions(limit)
     if not infos:
@@ -259,6 +274,17 @@ def main() -> None:
         help="本次会话结束后不检查记忆整理",
     )
     parser.add_argument(
+        "--web",
+        action="store_true",
+        help="启动网页界面（默认 http://127.0.0.1:8000）",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="网页界面的端口（配合 --web 使用）",
+    )
+    parser.add_argument(
         "--no-stream",
         dest="no_stream",
         action="store_true",
@@ -283,6 +309,10 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     root = Path(args.root).resolve()
+
+    if args.web:
+        _serve(root, args.port)
+        return
 
     if args.list_sessions is not None:
         _print_sessions(root, args.list_sessions)

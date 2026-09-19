@@ -10,6 +10,8 @@ Phase 2 起它持有 ToolRegistry：schema 从 registry 取，执行也从 regis
 
 from typing import TYPE_CHECKING
 
+from app.events import EventHook
+
 from app.agent.react_loop import ExecuteTool, MessageHook, run_react_loop
 from app.llm.client import LLMClient
 from app.memory.memory_manager import INDEX_LINK_PREFIX, MemoryManager
@@ -84,6 +86,7 @@ class MainAgent:
         memory: MemoryManager | None = None,
         compactor: "ContextCompactor | None" = None,
         on_delta: "DeltaHook | None" = None,
+        on_event: EventHook | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_steps: int = 10,
     ) -> None:
@@ -93,6 +96,7 @@ class MainAgent:
         self._session = session
         self._compactor = compactor
         self._on_delta = on_delta
+        self._on_event = on_event
 
         # registry 是可选依赖：不传就是 Phase 1 那种「没有工具」的状态。
         # 两种能力（schema 给模型看、execute 真执行）都从同一个对象取，
@@ -148,4 +152,5 @@ class MainAgent:
             on_message=self._message_hook,
             compactor=self._compactor,
             on_delta=self._on_delta,
+            on_event=self._on_event,
         )

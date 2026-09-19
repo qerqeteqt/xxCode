@@ -8,6 +8,7 @@ build_default_registry 是 Runtime 装配工具的唯一入口 —— 分散在�
 from collections.abc import Callable
 from pathlib import Path
 
+from app.events import EventHook
 from app.llm.client import LLMClient
 from app.tools.base import SandboxedTool, Tool, ToolError, ToolResult
 from app.tools.bash_tool import BashTool
@@ -54,6 +55,7 @@ def build_default_registry(
     llm: LLMClient | None = None,
     on_file_changed: Callable[[str], None] | None = None,
     gate: PermissionGate | None = None,
+    on_event: EventHook | None = None,
 ) -> ToolRegistry:
     """按项目根目录装配一整套工具。
 
@@ -69,7 +71,7 @@ def build_default_registry(
     工具层不该知道会话的存在。
     """
     sandbox = Sandbox(root)
-    registry = TrackingRegistry(on_change=on_file_changed, gate=gate)
+    registry = TrackingRegistry(on_change=on_file_changed, gate=gate, on_event=on_event)
     for tool in (
         ReadTool(sandbox),
         WriteTool(sandbox),
@@ -82,6 +84,6 @@ def build_default_registry(
         registry.register(tool)
 
     if llm is not None:
-        registry.register(SubAgentTool(sandbox, llm, gate=gate))
+        registry.register(SubAgentTool(sandbox, llm, gate=gate, on_event=on_event))
 
     return registry

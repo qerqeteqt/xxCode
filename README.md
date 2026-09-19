@@ -30,6 +30,8 @@ app/
   scheduler/  scheduler.py
   tools/      base.py  registry.py  sandbox.py  text.py
               file_tool.py  bash_tool.py  search_tool.py  subagent_tool.py
+  web/        server.py  static/index.html
+  events.py
 .agent/
   memory/          MEMORY.md  <key>.md …
   memory-backups/  <时间戳>/            AutoDream 跑之前的记忆快照
@@ -207,7 +209,7 @@ Main Agent 通过 `SubAgent` 工具派发子 Agent。三种规格只是三份配
   - [x] 7a — Retry + Token Management
   - [x] 7b — Context Compaction
   - [x] 7c — Permission
-  - [ ] 7d — Parallel SubAgent / Streaming✅ / Web UI
+  - [x] 7d — Streaming、Web UI（Parallel SubAgent 未做）
 
 Logging 与 Async 在前六个阶段已经顺手做掉了：每个模块一个 logger；从 Phase 1 起就是
 async 的，遗留只是搜索时的同步文件 IO 会短暂阻塞事件循环（当前规模无感）。
@@ -375,6 +377,8 @@ python main.py --session e649 "接着问"                 # 续指定会话（�
 python main.py --list-sessions                         # 列出最近的会话
 python main.py --consolidate                           # 强制整理一次记忆后退出
 python main.py --no-consolidate "随便问问"              # 这次跑完不检查整理
+python main.py --web                                   # 网页界面 http://127.0.0.1:8000
+python main.py --web --port 9000                       # 换个端口
 python main.py --no-stream "别流式"                     # 关掉逐字输出
 python main.py --yes "给脚本用"                         # 跳过权限确认（交互时别加）
 python main.py --root D:/pycharm/其他项目 "看看入口在哪"
@@ -408,6 +412,45 @@ python main.py --root D:/pycharm/其他项目 "看看入口在哪"
 **重试的边界变了。** 响应头到达之前的失败（429 / 5xx / 连不上）照样重试；
 **body 一旦开始往用户那边吐就不能重试了** —— 用户已经看到内容，重来一遍只会看到
 重复的一坨。所以重试的粒度是「发请求 + 判状态码」这一整段，流式解析在它之外。
+
+## 网页界面
+
+```bash
+python main.py --web          # 打开 http://127.0.0.1:8000
+```
+
+深色/浅色可切，右上角 ⚙ 里能改配置。
+
+**Runtime 一行没改。** 事件、流式、权限确认这三个口子都是早就留好的回调/注入点：
+
+| 网页上的东西 | 后端早就有的是什么 |
+|---|---|
+| 逐字输出 | `on_delta` 回调（7d 做的） |
+| 工具卡片 | 新增 `on_event` 事件通道（这一版补的） |
+| 授权按钮 | `confirmer` 本来就是 **async** 回调 —— await 一个 future，等浏览器 POST 回来 |
+| 设置面板 | `Settings` 通过 `_env_file` 指过去验证，写坏自动回滚 |
+
+如果有人问「依赖注入到底有什么用」，这个前端就是答案。
+
+**没有鉴权，也没有多用户。** 这是「你自己在本机开一个窗口用」的形态。
+要给别人用，得先做容器隔离、鉴权、限流 —— 那是另一件事。
+
+### 两个刻意的实现选择
+
+**前端不用 `EventSource`**，虽然它三行就能接上 SSE。因为 `EventSource` 断线会
+**自动重连** —— 而那会把同一个问题重跑一遍。改用 `fetch` + 手动读流，多写 15 行，
+换掉一个很隐蔽的坑。
+
+**前端一律用 `textContent`，不拼 `innerHTML`。** 模型输出和工具结果都是不可信内容，
+拼 HTML 等于给自己开了个 XSS 口子。
+
+### 设置面板能改什么
+
+白名单，不是黑名单 —— 加一项要显式去 `EDITABLE_KEYS` 里加。
+`.env` 里还有 API Key，绝不能让它被网页随便写。
+
+改动会写回 `.env`（**保留注释和顺序**），并通过 `Settings(_env_file=...)` 验证；
+验证不过就原样回滚。不这么做的话，把 `max_steps` 写成 `abc` 会让下次启动直接起不来。
 
 ## 开发原则
 

@@ -13,6 +13,7 @@ get_settings() 用 lru_cache 包了一层：配置只在第一次调用时读取
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # .env 定位到仓库根目录，而不是「当前工作目录」。
@@ -27,8 +28,11 @@ class Settings(BaseSettings):
         extra="ignore",  # .env 里有多余的键也不报错
     )
 
-    # 字段名 llm_api_key 会自动匹配环境变量 LLM_API_KEY（大小写不敏感）
-    llm_api_key: str
+    # 字段名 llm_api_key 会自动匹配环境变量 LLM_API_KEY（大小写不敏感）。
+    # min_length=1 不能省：空字符串是合法的 str，能过类型检查，
+    # 但它会在发请求时变成一个 401 —— 那比「配置不合法」难查得多。
+    # 挡在门口，错在启动时，一行就说清楚
+    llm_api_key: str = Field(min_length=1)
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
     llm_timeout: float = 60.0

@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from app.llm.client import LLMClient
 
+from app.events import EventHook, emit
+
 if TYPE_CHECKING:
     from app.context.compactor import ContextCompactor
     from app.llm.client import DeltaHook
@@ -76,6 +78,7 @@ async def run_react_loop(
     on_message: MessageHook | None = None,
     compactor: "ContextCompactor | None" = None,
     on_delta: "DeltaHook | None" = None,
+    on_event: EventHook | None = None,
 ) -> str:
     """驱动 ReAct 循环，返回模型的最终回答。
 
@@ -99,6 +102,9 @@ async def run_react_loop(
             on_message(message)
 
     for step in range(1, max_steps + 1):
+        # 步数也发成事件 —— CLI 靠它打日志，Web 靠它画「第 N 步」的分隔线
+        emit(on_event, "step", step=step, max_steps=max_steps)
+
         if compactor is not None:
             # 压缩是就地改 messages 的，所以 record 的调用方（Session）不会
             # 收到「消息被删了」的通知 —— 它靠 compactor 自己的回调写 compaction 记录

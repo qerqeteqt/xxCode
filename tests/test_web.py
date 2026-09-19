@@ -10,9 +10,12 @@ import json
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.agent.react_loop import run_react_loop
 from app.events import Event, emit, tag_events  # noqa: F401  (tag_events 由子 Agent 用)
+from app.llm.client import TokenUsage
+from app.memory.memory_manager import MemoryManager
 from app.memory.session_store import SessionStore
 from app.tools import build_default_registry
 from app.web.server import apply_settings, update_env
@@ -234,8 +237,6 @@ async def _never(tool_call: dict) -> str:
 
 @pytest.fixture
 def client(tmp_path):
-    from fastapi.testclient import TestClient
-
     from app.web.server import create_app
 
     session = SessionStore(tmp_path).create()
@@ -294,3 +295,98 @@ def test_设置接口拒绝白名单之外的键(client):
 
     assert resp.status_code == 400
     assert "不可修改" in resp.json()["detail"]
+
+
+# ================================================================ 对话端点
+
+
+class _FakeLLM:
+    """顶替真的 LLMClient，按脚本回复。
+
+    为什么这个测试值得存在：`/api/chat` 是全项目唯一「只靠手工点过」的路径。
+    实测里就是它漏了一个函数定义（局部名只在调用时才解析，静态检查看不出来），
+    而这个 bug 只在浏览器里点才暴露 —— 单元测试和 CLI 冒烟都是绿的。
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.usage = TokenUsage()
+        self.last_prompt_tokens = 0
+        self._replies = [
+            {"role": "assistant", "content": "好的记住了"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "WriteMemory",
+                            "arguments": json.dumps(
+                                {
+                                    "key": "pref", "name": "偏好",
+                                    "description": "测试", "category": "User",
+                                    "content": "用户喜欢简洁。",
+                                },
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "写入 1 条"},
+        ]
+
+    async def chat(self, messages, tools=None, on_delta=None):
+        # 有 on_delta 说明走流式：把内容切片吐出去，行为要和真 client 一致
+        reply = self._replies.pop(0)
+        if on_delta is not None and reply.get("content"):
+            for ch in reply["content"]:
+                on_delta(ch)
+        return reply
+
+    async def aclose(self):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.aclose()
+
+
+def test_网页发一条消息会跑完整条链路(tmp_path, monkeypatch):
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _FakeLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        resp = client.post(
+            "/api/chat",
+            json={"session_id": session.session_id, "question": "记住我喜欢简洁"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+
+    kinds = [e["type"] for e in events]
+    assert "done" in kinds
+    # 关键：记忆提取这一步真的跑了，而且带了 phase 标记
+    assert "memory" in kinds
+    extract = next(e for e in events if e["type"] == "memory")
+    assert extract["data"]["phase"] == "extract"
+    assert extract["data"]["changed"] == [".agent/memory/pref.md"]
+
+    # 记忆真的写进去了
+    assert "简洁" in MemoryManager(tmp_path).read_memory("pref").content
+
+
+def _parse_sse(text: str) -> list[dict]:
+    """把 SSE 文本拆成 [{type, data}, ...]。"""
+    out = []
+    for block in text.split("\n\n"):
+        kind = next((l[7:] for l in block.splitlines() if l.startswith("event: ")), None)
+        payload = next((l[6:] for l in block.splitlines() if l.startswith("data: ")), None)
+        if kind and payload:
+            out.append({"type": kind, "data": json.loads(payload)})
+    return out

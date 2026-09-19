@@ -341,6 +341,45 @@ def create_app(root: str | Path) -> FastAPI:
         return out
 
     # live 在 chat() 里才存在，必须当参数传进来 —— 嵌套函数看不到调用方的局部变量
+    async def _extract_memory(queue: asyncio.Queue, live: LiveSession) -> None:
+        """每轮对话后跑一次：看看这轮有没有值得长期记住的东西。
+
+        独立成一步而不是塞进 Main Agent 的工具里，好处是主对话的 Context
+        完全不受影响 —— 提取失败的、判断「不值得记」的，统统不会污染
+        用户正在看的那段对话。
+        """
+        if not get_settings().extract_memory:
+            return
+
+        try:
+            # 用会话自己的 client：提取的开销也算进这次的账单，不然它会凭空消失
+            result = await MemoryExtractor(project_root, live.llm).run(
+                live.session.load_messages()
+            )
+        except Exception as e:  # noqa: BLE001 —— 提取是「顺带做的事」
+            logger.exception("记忆提取出错")
+            queue.put_nowait(
+                Event(
+                    "memory",
+                    {"phase": "extract", "status": "failed", "message": str(e)},
+                )
+            )
+            return
+
+        if result is None:
+            return  # 这一轮没什么可看的
+        queue.put_nowait(
+            Event(
+                "memory",
+                {
+                    "phase": "extract",
+                    "status": "done" if result.completed else "failed",
+                    "summary": result.summary,
+                    "changed": result.changed,
+                },
+            )
+        )
+
     async def _consolidate_if_due(
         queue: asyncio.Queue, live: LiveSession
     ) -> None:

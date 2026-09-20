@@ -253,7 +253,19 @@ category: Project
 | `CONSOLIDATE_MIN_SESSIONS` | 5 | 记忆整理：最小新会话数 |
 | `TAVILY_API_KEY` | 空 | 留空则不注册 `WebSearch` |
 
-后 6 项可以在网页设置面板改。`LLM_API_KEY` 和 `TAVILY_API_KEY` **不在面板里** ——
+后 6 项可以在网页设置面板改。
+
+**⚠️ `MAX_STEPS` 只管 Main Agent。** 其他角色各有独立预算，按角色定，
+本来就不该跟 Main 一样：
+
+| 角色 | 步数 | 在哪 |
+|---|---|---|
+| Main Agent | `MAX_STEPS`（60） | `config/settings.py` |
+| Explore | 8 | `app/agent/subagent.py` |
+| Plan | 8 | `app/agent/subagent.py` |
+| General-Purpose | 12 | `app/agent/subagent.py` |
+| AutoDream | 12 | `app/memory/auto_dream.py` |
+| 记忆提取器 | 6 | `app/memory/extractor.py` |`LLM_API_KEY` 和 `TAVILY_API_KEY` **不在面板里** ——
 `.env` 里的密钥不该被网页随便读写。
 
 ## Phase 进度

@@ -87,6 +87,7 @@ class MainAgent:
     def __init__(
         self,
         llm: LLMClient,
+        max_steps: int,
         registry: ToolRegistry | None = None,
         session: Session | None = None,
         memory: MemoryManager | None = None,
@@ -94,7 +95,6 @@ class MainAgent:
         on_delta: "DeltaHook | None" = None,
         on_event: EventHook | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        max_steps: int = 10,
     ) -> None:
         self._llm = llm
         self._system_prompt = _compose_system_prompt(system_prompt, memory)

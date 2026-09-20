@@ -235,7 +235,9 @@ def test_循环里会在每次调用前检查压缩():
     messages.append({"role": "user", "content": "接着干"})
 
     answer = _run(
-        run_react_loop(messages, reply_llm, _never_called, compactor=compactor)
+        run_react_loop(
+            messages, reply_llm, _never_called, max_steps=10, compactor=compactor
+        )
     )
 
     assert answer == "完成"

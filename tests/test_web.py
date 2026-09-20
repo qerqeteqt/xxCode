@@ -122,6 +122,7 @@ def test_循环发出_step_事件(tmp_path):
             [{"role": "user", "content": "问"}],
             llm,
             _never,
+            max_steps=10,
             on_event=events.append,
         )
     )

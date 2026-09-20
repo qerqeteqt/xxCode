@@ -77,7 +77,7 @@ def test_returns_final_answer_when_no_tool_call():
     llm = FakeLLM([_assistant("这是答案")])
     messages = [SYSTEM, USER]
 
-    answer = _run(run_react_loop(messages, llm, FakeTools()))
+    answer = _run(run_react_loop(messages, llm, FakeTools(), max_steps=10))
 
     assert answer == "这是答案"
     assert len(llm.calls) == 1
@@ -96,7 +96,7 @@ def test_tool_call_then_final_answer():
     tools = FakeTools({"Read": "文件内容"})
     messages = [SYSTEM, USER]
 
-    answer = _run(run_react_loop(messages, llm, tools))
+    answer = _run(run_react_loop(messages, llm, tools, max_steps=10))
 
     assert answer == "a.py 里是一个空文件"
     assert len(tools.received) == 1
@@ -128,7 +128,7 @@ def test_multiple_tool_calls_in_one_turn_all_executed():
     tools = FakeTools()
     messages = [SYSTEM, USER]
 
-    _run(run_react_loop(messages, llm, tools))
+    _run(run_react_loop(messages, llm, tools, max_steps=10))
 
     assert [tc["id"] for tc in tools.received] == ["call_a", "call_b"]
     tool_msgs = [m for m in messages if m["role"] == "tool"]
@@ -146,7 +146,7 @@ def test_tool_exception_is_fed_back_not_raised():
     tools = FakeTools(raises={"Bash": RuntimeError("命令超时")})
     messages = [SYSTEM, USER]
 
-    answer = _run(run_react_loop(messages, llm, tools))
+    answer = _run(run_react_loop(messages, llm, tools, max_steps=10))
 
     assert answer == "Bash 不可用，我改用别的方式"
     tool_msg = next(m for m in messages if m["role"] == "tool")
@@ -244,7 +244,7 @@ def test_on_message_每条新增消息都回调一次():
     seen: list[dict] = []
     messages = [SYSTEM, USER]
 
-    _run(run_react_loop(messages, llm, FakeTools(), on_message=seen.append))
+    _run(run_react_loop(messages, llm, FakeTools(), max_steps=10, on_message=seen.append))
 
     assert [m["role"] for m in seen] == ["assistant", "tool", "assistant"]
     assert seen == messages[2:]
@@ -255,6 +255,6 @@ def test_tools_schema_is_passed_through():
     schema = [{"type": "function", "function": {"name": "Read"}}]
     llm = FakeLLM([_assistant("好")])
 
-    _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), tools=schema))
+    _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=10, tools=schema))
 
     assert llm.tools_seen == [schema]

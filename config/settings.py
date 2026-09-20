@@ -42,16 +42,25 @@ class Settings(BaseSettings):
     # 而不是注册上去、调用时才报错
     tavily_api_key: str = ""
 
-    # ReAct Loop 的最大循环次数，超了就抛 MaxIterationError。
+    # **Main Agent** 的最大循环次数，超了就抛 MaxIterationError。
     #
-    # **它的定位是「防打转的兜底」，不是「预算」。**
-    # 别拿它当成本控制 —— 写一个 200 行文件是 1 步，`git status` 也是 1 步，
-    # 两者成本差两三个量级，共用一个计数器必然一头不够用、一头管不住。
-    # 成本看 token 统计（`SessionState` 里那几个字段），那个才是钱。
+    # 定位是「防打转的兜底」，不是「预算」。别拿它当成本控制 ——
+    # 写一个 200 行文件是 1 步，`git status` 也是 1 步，两者成本差两三个量级，
+    # 共用一个计数器必然一头不够用、一头管不住。成本看 token 统计。
     #
     # 60 而不是 20：实测里「写个程序 + 跑测试 + 调试」这种正常任务要 30-40 步
     # （撞 20 的那次，光 pytest → 改 → 再 pytest 就占了 17 步）。
-    # 真正的打转（每步都在调同样的工具、没有进展）在 60 步内也看得出来。
+    #
+    # ⚠️ **这一项只管 Main Agent。** 其他角色各有自己的步数预算，都是独立的
+    # （按角色定，本来就不该跟 Main 一样）：
+    #
+    #     Explore              8    app/agent/subagent.py
+    #     Plan                 8    app/agent/subagent.py
+    #     General-Purpose     12    app/agent/subagent.py
+    #     AutoDream           12    app/memory/auto_dream.py
+    #     记忆提取器            6    app/memory/extractor.py
+    #
+    # 改这里不会影响它们。真要让它们也可配，再往外提成配置项。
     max_steps: int = 60
 
     # 记忆整理（AutoDream）的触发条件。两个是**并且**关系 —— 都满足才跑。

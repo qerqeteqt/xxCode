@@ -234,7 +234,7 @@ def test_记忆索引被注入_system_prompt(tmp_path):
 
     llm = ScriptedLLM([_assistant("好")])
     registry = build_default_registry(tmp_path)
-    agent = MainAgent(llm=llm, registry=registry, memory=memory)
+    agent = MainAgent(llm=llm, max_steps=10, registry=registry, memory=memory)
 
     _run(agent.run("你好"))
 
@@ -247,7 +247,7 @@ def test_记忆索引被注入_system_prompt(tmp_path):
 
 def test_没有记忆时不注入那段(tmp_path):
     llm = ScriptedLLM([_assistant("好")])
-    agent = MainAgent(llm=llm, registry=build_default_registry(tmp_path))
+    agent = MainAgent(llm=llm, max_steps=10, registry=build_default_registry(tmp_path))
 
     _run(agent.run("你好"))
 
@@ -266,7 +266,7 @@ def test_记忆变了续会话能看到新的索引(tmp_path):
     llm1 = ScriptedLLM([_assistant("第一次")])
     _run(
         MainAgent(
-            llm=llm1, registry=registry, session=session, memory=memory
+            llm=llm1, max_steps=10, registry=registry, session=session, memory=memory
         ).run("第一个问题")
     )
     session.finish("finished")
@@ -279,7 +279,7 @@ def test_记忆变了续会话能看到新的索引(tmp_path):
     llm2 = ScriptedLLM([_assistant("第二次")])
     _run(
         MainAgent(
-            llm=llm2, registry=registry, session=resumed, memory=memory
+            llm=llm2, max_steps=10, registry=registry, session=resumed, memory=memory
         ).run("第二个问题")
     )
 

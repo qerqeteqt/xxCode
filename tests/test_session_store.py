@@ -275,7 +275,7 @@ def test_跑一轮之后_jsonl_里有完整会话(tmp_path):
     session = SessionStore(tmp_path).create()
     llm = ScriptedLLM([_assistant("我是答案")])
     registry = build_default_registry(tmp_path, on_file_changed=session.add_changed_file)
-    agent = MainAgent(llm=llm, registry=registry, session=session)
+    agent = MainAgent(llm=llm, max_steps=10, registry=registry, session=session)
 
     answer = _run(agent.run("你好"))
     session.finish("finished")
@@ -294,14 +294,14 @@ def test_恢复会话后接着聊能看到之前的历史(tmp_path):
     session = store.create()
     llm = ScriptedLLM([_assistant("第一次回答")])
     registry = build_default_registry(tmp_path, on_file_changed=session.add_changed_file)
-    _run(MainAgent(llm=llm, registry=registry, session=session).run("第一个问题"))
+    _run(MainAgent(llm=llm, max_steps=10, registry=registry, session=session).run("第一个问题"))
     session.finish("finished")
 
     # 模拟"下一次启动"：只从磁盘拿会话，内存里的东西一概没有
     resumed = store.load(session.session_id)
     llm2 = ScriptedLLM([_assistant("第二次回答")])
     registry2 = build_default_registry(tmp_path, on_file_changed=resumed.add_changed_file)
-    _run(MainAgent(llm=llm2, registry=registry2, session=resumed).run("第二个问题"))
+    _run(MainAgent(llm=llm2, max_steps=10, registry=registry2, session=resumed).run("第二个问题"))
 
     first_call = llm2.calls[0]
     assert [m["role"] for m in first_call] == ["system", "user", "assistant", "user"]
@@ -328,7 +328,7 @@ def test_工具改动文件会实时进_state(tmp_path):
         ]
     )
     registry = build_default_registry(tmp_path, on_file_changed=session.add_changed_file)
-    _run(MainAgent(llm=llm, registry=registry, session=session).run("建个文件"))
+    _run(MainAgent(llm=llm, max_steps=10, registry=registry, session=session).run("建个文件"))
     session.finish("finished")
 
     # 落盘之后再读回来，改动清单还在

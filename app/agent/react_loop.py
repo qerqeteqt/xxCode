@@ -111,14 +111,20 @@ async def run_react_loop(
     messages: list[dict],
     llm: LLMClient,
     execute_tool: ExecuteTool,
+    max_steps: int,
     tools: list[dict] | None = None,
-    max_steps: int = 10,
     on_message: MessageHook | None = None,
     compactor: "ContextCompactor | None" = None,
     on_delta: "DeltaHook | None" = None,
     on_event: EventHook | None = None,
 ) -> str:
     """驱动 ReAct 循环，返回模型的最终回答。
+
+    **`max_steps` 是必填的，没有默认值。** 一个通用循环不该替调用方决定跑几步 ——
+    之前这里有个默认的 10，和 `settings.max_steps`（60）并存，读代码的人会
+    以为上限是 10。每个调用方的合理预算本来就不同（Main 要 60，Explore 8 步够了，
+    提取记忆 6 步），所以"必须显式给"才是对的。
+
 
     返回后 messages 里包含完整的一轮交互（含最初的 system / user），
     直到最后那条 assistant 最终回答 —— 它是**就地修改**的，不是复制。

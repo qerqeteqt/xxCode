@@ -87,12 +87,14 @@ def build_default_registry(
         GrepTool(sandbox),
         BashTool(sandbox),
     ):
+        # 注册工具部分代码
         registry.register(tool)
 
     if tavily_api_key:
         registry.register(WebSearchTool(tavily_api_key))
 
     if llm is not None:
+        # 将子agent注入工具中！
         registry.register(SubAgentTool(sandbox, llm, gate=gate, on_event=on_event))
 
     return registry

@@ -30,7 +30,16 @@ env/
 # 整理状态和备份也要看本机情况，换台机器就重来，没必要入库
 .agent/consolidation.json
 .agent/memory-backups/
+# 用户贴进来的截图。是本机数据，而且可能是屏幕上任何东西 —— 不该入库。
+# 名字是内容哈希，所以同一张图贴两次只占一份
+.agent/images/
 # 注意：.agent/memory/ 下的 Markdown 是长期知识，需要入库，故不在此忽略
+#
+# 例外：frontmatter 里 category 是 User 的那些含个人信息，而这个仓库是**公开的**。
+# 记忆是 agent 自动写的，所以以后新增 User 类记忆时要记得回来补一行 ——
+# .gitignore 没法按 frontmatter 过滤，只能一个个列
+.agent/memory/user-name.md
+.agent/memory/user-favorite-character.md
 
 # ---- 一次性的实验产物 ----
 # 贪吃蛇是拿这个 agent 跑出来的东西，不是这个项目的代码。
@@ -38,3 +47,7 @@ env/
 # 语义上不对。真要长期留，应该挪到 examples/ 之类的地方。
 tests/snake.py
 tests/test_snake.py
+# hot100 和 test.py 同理：都是拿这个 agent 跑出来的东西，不是这个项目的代码。
+# hot100 还是 100 个文件的解题产物，入库只会带来提交噪声
+/hot100/
+/test.py

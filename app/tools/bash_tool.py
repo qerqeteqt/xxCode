@@ -245,6 +245,15 @@ class BashTool(SandboxedTool):
                 f"命令执行超时（超过 {timeout:g} 秒），已被强制终止。"
                 f"如果是长时间任务，请拆小或提高 timeout 参数。"
             ) from None
+        except asyncio.CancelledError:
+            # 用户按了停止。命令树必须跟着死 —— 留一个后台的 pytest / npm
+            # 会继续占着端口和文件，而且没有任何人知道它还在跑。
+            #
+            # 只兜超时是不够的：CancelledError 继承 BaseException，不是
+            # TimeoutError 也不是 Exception，取消路径不写在这里就等于没写。
+            # 单次取消不会打断 handler 里的 await，所以 _kill_tree 跑得完。
+            await _kill_tree(process)
+            raise
 
         stdout = decode_bytes(stdout_b, prefer_utf8=False)
         stderr = decode_bytes(stderr_b, prefer_utf8=False)

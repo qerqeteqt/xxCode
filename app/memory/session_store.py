@@ -81,7 +81,7 @@ class SessionState:
     """
 
     session_id: str
-    status: str = "running"  # running | finished | failed
+    status: str = "running"  # running | finished | failed | stopped
     files_changed: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""

@@ -73,6 +73,10 @@
     box-shadow: 0 1px 8px -2px var(--glow-1);
   }
   button.primary:hover:not(:disabled) { filter: brightness(1.12); border-color: transparent; }
+  /* 跑的时候「发送」换成它。用红描边而不是 primary 的实心渐变 —— 一眼看出
+     这是中断，不是主操作。刻意**不**用 disabled：那会显得无路可走 */
+  button.halt { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+  button.halt:hover:not(:disabled) { border-color: var(--err); }
 
   /* ================= 左侧会话栏 ================= */
   .sidebar {
@@ -250,6 +254,7 @@
     max-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-word;
   }
   .ok { color: var(--ok); } .fail { color: var(--err); } .run { color: var(--warn); }
+  .stop { color: var(--dim); }
 
   .perm {
     border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
@@ -272,6 +277,13 @@
   }
   /* 记忆写入用强调色，和报错的红区分开 —— 它是个好事情 */
   .note.memo { border-left-color: var(--accent); background: var(--grad-bubble); }
+  /* 用户主动中止：不是报错，所以用警示色而不是 .note 默认的红 */
+  .note.halt {
+    border-left-color: var(--warn);
+    background: linear-gradient(90deg,
+      color-mix(in srgb, var(--warn) 15%, transparent),
+      color-mix(in srgb, var(--warn) 3%, transparent));
+  }
   .memo-files { font-size: 12px; color: var(--dim); margin-top: 4px; }
   .note .partial { color: var(--dim); font-size: 13px; white-space: pre-wrap;
                    margin-top: 8px; max-height: 240px; overflow: auto; }
@@ -425,7 +437,7 @@ const FIELD_SPEC = {
 };
 
 const state = {
-  sessionId: null, busy: false, stepBlock: null, toolCards: {}, sessions: [],
+  sessionId: null, busy: false, stopping: false, stepBlock: null, toolCards: {}, sessions: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -741,6 +753,29 @@ function addToolResult(data) {
   scrollDown();
 }
 
+// 一轮结束时收拾「还在跑」的痕迹。
+// 放在 send() 的 finally 里统一调一次，所以对**所有**终止路径都生效：报错、
+// 撞步数上限、用户中止、连接断掉。以前谁都不扫，结果循环一死，「运行中…」
+// 的卡片和看起来还能点的授权按钮就永远留在界面上了。
+function sweepPending() {
+  for (const card of Object.values(state.toolCards)) {
+    const badge = card.querySelector(".state");
+    if (!badge || !badge.classList.contains("run")) continue;
+    badge.textContent = "已中止";
+    badge.className = "state stop";
+    const pre = card.querySelector("pre");
+    if (pre.textContent === "等待结果…") pre.textContent = "（本轮已中止）";
+  }
+  // 授权卡片：服务端那个 future 会随取消一起被清掉，这些按钮再点只会拿到
+  // 一个静默的 404。换成一句说明，别留个能点但没用的东西
+  log.querySelectorAll(".perm").forEach((box) => {
+    const actions = box.querySelector(".actions");
+    if (!actions) return;
+    actions.className = "partial";
+    actions.textContent = "本轮已中止，这个授权请求已失效。";
+  });
+}
+
 function prettyArgs(raw) {
   try {
     return Object.entries(JSON.parse(raw)).map(([k, v]) => {
@@ -832,9 +867,62 @@ function addError(data) {
   scrollDown();
 }
 
+function addStopped(data) {
+  // 和 addError 是同一个形状（partial + 继续按钮），差别只在措辞和配色 ——
+  // 用户自己按的停止不是报错，用 .halt 的警示色而不是红
+  const box = el("div", "note halt");
+  box.append(el("div", null, "已中止这一轮。"));
+  if (data.partial) {
+    box.append(el("div", "partial", "它中断前的最后进展：\n" + data.partial));
+  }
+  if (data.can_continue) {
+    const row = el("div", "actions");
+    const btn = el("button", "primary", "接着上次继续");
+    btn.onclick = () => {
+      box.remove();
+      send("接着刚才没做完的继续。先看一眼当前文件状态再动手，不要重头再来。");
+    };
+    row.append(btn);
+    box.append(row);
+  }
+  log.append(box);
+  scrollDown();
+}
+
 const addMeta = (text) => { log.append(el("div", "meta", text)); scrollDown(); };
 
 // ---------------------------------------------------------------- 对话
+
+// 「发送」和「停止」共用同一个按钮：跑起来之后它就是停止键。
+// 为什么共用一个而不是加第二个按钮 —— 跑的时候本来也发不出消息，
+// 多一个按钮只是多一处要同步的启用/禁用状态
+function setRunning(on) {
+  state.busy = on;
+  if (!on) state.stopping = false;
+  const btn = $("send");
+  btn.textContent = on ? (state.stopping ? "正在停止…" : "停止") : "发送";
+  btn.className = on ? "halt" : "primary";
+}
+
+async function stop() {
+  if (state.stopping || !state.sessionId) return;
+  state.stopping = true;
+  $("send").textContent = "正在停止…";
+  try {
+    await fetch("/api/stop", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: state.sessionId }),
+    });
+    // 不在这里收尾，也**不把非 2xx 当错误**：409 意味着它刚好已经跑完了，
+    // 那正是我们想要的结果。以 SSE 流为准 —— 流结束时 send() 的 finally
+    // 会统一把按钮恢复成「发送」
+  } catch (e) {
+    // 网络层面没发出去，那停止就没生效。把按钮放回「停止」让用户能再试
+    state.stopping = false;
+    setRunning(true);
+    toast("停止请求没发出去：" + e.message);
+  }
+}
 
 async function send(override) {
   const input = $("input");
@@ -850,8 +938,7 @@ async function send(override) {
   input.value = "";
   autoGrow();
 
-  state.busy = true;
-  $("send").disabled = true;
+  setRunning(true);
 
   try {
     const resp = await fetch("/api/chat", {
@@ -886,8 +973,8 @@ async function send(override) {
   } catch (e) {
     addError({ message: "连接中断：" + e.message });
   } finally {
-    state.busy = false;
-    $("send").disabled = false;
+    setRunning(false);
+    sweepPending();         // 结算时把「运行中…」的卡片和失效的授权卡收拾掉
     await loadSessions();   // 标题、条数、tokens 都会变
   }
 }
@@ -900,6 +987,7 @@ function handleEvent(type, data) {
     case "tool_result": addToolResult(data); break;
     case "permission":  addPermission(data); break;
     case "error":       addError(data); break;
+    case "stopped":     addStopped(data); break;
     case "done":
       addMeta(`完成 · ${humanTokens(data.total_tokens)} tokens · ${data.calls} 次调用`);
       break;
@@ -918,7 +1006,8 @@ $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
 // 包一层：直接写 onclick = send 的话，点击事件会被当成 override 传进去
-$("send").onclick = () => send();
+// 同一个按钮两种职责：跑着的时候它是停止键
+$("send").onclick = () => (state.busy ? stop() : send());
 
 // ---------------------------------------------------------------- 设置
 

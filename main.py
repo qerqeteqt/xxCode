@@ -169,8 +169,20 @@ async def _run_session(
                 ),
                 partial=e.partial,
             ) from None
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Ctrl+C。用户主动停的，和「跑失败了」不是一回事 —— 记成 failed
+            # 会让 --list-sessions 说谎。
+            #
+            # 两个都收是因为 asyncio 的版本差异：3.13 的 Runner 在信号处理里
+            # 取消主任务，所以这里拿到的是 CancelledError 而不是 KeyboardInterrupt。
+            #
+            # 半途被打断的 assistant / tool 配对已由 react_loop 补齐，所以这个
+            # 会话下次 --continue 仍然喂得进 API（以前不补，会直接 400）
+            _record_usage()
+            session.finish("stopped")
+            raise
         except BaseException:
-            # 包括 Ctrl+C 和 LLM 报错。会话文件里要留下「这次没跑完」的痕迹，
+            # LLM 报错之类。会话文件里要留下「这次没跑完」的痕迹，
             # 否则下次 --continue 会以为上次是正常结束的
             _record_usage()
             session.finish("failed")
@@ -399,6 +411,14 @@ def main() -> None:
             # 把它说出来，用户才知道它卡在哪
             print(f"\n它中断前的最后进展：\n{e.partial}", file=sys.stderr)
         raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        # Ctrl+C 是用户主动停的，不是崩溃。默认行为是甩一段 traceback，
+        # 而这里更该告诉他「怎么接着来」—— 历史已经逐条落盘了
+        print(
+            '\n已中断。用 python main.py --continue "接着上次" 可以从这里继续。',
+            file=sys.stderr,
+        )
+        raise SystemExit(130) from None
 
     # 先把答案给你看，再跑整理 —— 整理可能几十秒，不该挡在答案前面
     if args.no_stream:

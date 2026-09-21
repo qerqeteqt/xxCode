@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+import threading
 
 import pytest
 from fastapi import HTTPException
@@ -439,3 +440,197 @@ def test_撞上限的会话标为_failed_并记下用量(tmp_path, monkeypatch):
     reloaded = SessionStore(tmp_path).load(session.session_id)
     assert reloaded.state.status == "failed"  # 不是 finished
     assert reloaded.state.total_tokens > 0  # 用量记下来了
+
+
+# ================================================================ 终止
+
+
+class _StallsLLM(_FakeLLM):
+    """第 1 步照常调一个只读工具，第 2 步真的挂住，直到被取消。
+
+    为什么先走一步：只有走过一步，会话里才有「中断前的进展」可报。
+    一上来就挂住的话 partial 本来就该是空的 —— 那等于没测到 last_progress
+    从会话文件里取数这条路。
+
+    **不能复用 _NeverFinishesLLM**：它是靠一直返回 tool_calls 来「不结束」的，
+    协程从不 yield —— 而 CancelledError 只在 await 点投递，忙等的协程压根收不到取消。
+    所以要真 `await` 住。
+
+    用 threading.Event 而不是 asyncio.Event，是因为测试线程在事件循环外面，
+    没法 await。
+    """
+
+    started = threading.Event()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        type(self).started.clear()
+        self._step = 0
+
+    async def chat(self, messages, tools=None, on_delta=None):
+        self._step += 1
+        self.usage = TokenUsage(100, 10, self.usage.calls + 1)
+        if self._step == 1:
+            # List 是只读工具，不弹权限窗，正好用来留下一步「进展」
+            return {
+                "role": "assistant",
+                "content": "先看一眼目录",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "List", "arguments": '{"path": "."}'},
+                    }
+                ],
+            }
+        type(self).started.set()
+        await asyncio.Event().wait()   # 一直等，等外面来取消
+
+
+def test_停止会中止本轮并推_stopped_事件(tmp_path, monkeypatch):
+    """用户按停止：这一轮要停下来，历史仍然合法，状态如实记成 stopped。
+
+    必须用 `with TestClient(...)`：裸 fixture 每次请求新建一个事件循环，
+    跨两个请求去取消一个任务会炸「Future attached to a different loop」。
+    """
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _StallsLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        box: dict = {}
+        # 流式响应会把整个 body 读完之后才返回，所以 /api/chat 得丢到别的线程去，
+        # 主线程才有机会发 /api/stop
+        thread = threading.Thread(
+            target=lambda: box.update(
+                resp=client.post(
+                    "/api/chat",
+                    json={"session_id": session.session_id, "question": "慢慢想"},
+                )
+            )
+        )
+        thread.start()
+        assert _StallsLLM.started.wait(5), "模型一直没被调用，测不了停止"
+
+        resp = client.post("/api/stop", json={"session_id": session.session_id})
+        assert resp.status_code == 200
+        # 这条要**先**断言：回归时它会干脆地失败，而不是挂住整个测试套件
+        thread.join(5)
+        assert not thread.is_alive(), "/api/chat 没有随着停止一起结束"
+
+    events = _parse_sse(box["resp"].text)
+    kinds = [e["type"] for e in events]
+    assert "stopped" in kinds
+    stopped = next(e for e in events if e["type"] == "stopped")
+    assert stopped["data"]["can_continue"] is True
+    assert "调用了" in stopped["data"]["partial"]   # 中断前的进展有报出来
+
+    reloaded = SessionStore(tmp_path).load(session.session_id)
+    assert reloaded.state.status == "stopped"       # 不是 failed，也不是 finished
+
+
+def test_答案已经给出后再停止会话仍算完成(tmp_path, monkeypatch):
+    """答案发出去之后才停（停在记忆提取那一步），这一轮其实是**完成**的。
+
+    报成 stopped 会让会话列表说谎，也会给前端一个没东西可继续的「继续」按钮。
+    """
+    import app.web.server as server
+
+    class _AnswersThenStalls(_FakeLLM):
+        started = threading.Event()
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            type(self).started.clear()
+            type(self).calls = 0
+
+        async def chat(self, messages, tools=None, on_delta=None):
+            type(self).calls += 1
+            if type(self).calls > 1:
+                # 第 2 次调用是记忆提取那一步
+                type(self).started.set()
+                await asyncio.Event().wait()
+            reply = self._replies.pop(0)
+            if on_delta is not None and reply.get("content"):
+                for ch in reply["content"]:
+                    on_delta(ch)
+            return reply
+
+    monkeypatch.setattr(server, "LLMClient", _AnswersThenStalls)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        box: dict = {}
+        thread = threading.Thread(
+            target=lambda: box.update(
+                resp=client.post(
+                    "/api/chat",
+                    json={"session_id": session.session_id, "question": "问一句"},
+                )
+            )
+        )
+        thread.start()
+        assert _AnswersThenStalls.started.wait(5), "记忆提取那一步一直没跑起来"
+        client.post("/api/stop", json={"session_id": session.session_id})
+        thread.join(5)
+        assert not thread.is_alive()
+
+    kinds = [e["type"] for e in _parse_sse(box["resp"].text)]
+    assert "done" in kinds
+    assert "stopped" not in kinds
+
+    assert SessionStore(tmp_path).load(session.session_id).state.status == "finished"
+
+
+def test_跑完之后再停止返回_409(tmp_path, monkeypatch):
+    """用户慢了半拍：点停止时这一轮刚好已经跑完。
+
+    前端把非 2xx 当静默无操作处理 —— 以 SSE 流为准，这里只是尽力而为，
+    不该弹一个「停止失败」的错。
+    """
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _FakeLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        client.post(
+            "/api/chat",
+            json={"session_id": session.session_id, "question": "记住我喜欢简洁"},
+        )
+        resp = client.post("/api/stop", json={"session_id": session.session_id})
+
+    assert resp.status_code == 409
+
+
+def test_停止没跑过的会话返回_404(client):
+    """没有 LiveSession = 这个会话根本没在跑。"""
+    c, session = client
+
+    assert c.post("/api/stop", json={"session_id": session.session_id}).status_code == 404
+    assert c.post("/api/stop", json={"session_id": "根本不存在"}).status_code == 404
+
+
+def test_收尾会落状态并推结束哨兵(tmp_path, monkeypatch):
+    """finalize 是同步的，而且必须在 detach 之前推哨兵 —— 顺序错了流就永远不结束。"""
+    import app.web.server as server
+    from config.settings import get_settings
+
+    monkeypatch.setattr(server, "LLMClient", _FakeLLM)
+    session = SessionStore(tmp_path).create()
+
+    async def scenario() -> asyncio.Queue:
+        live = server.LiveSession(tmp_path, session, get_settings())
+        queue: asyncio.Queue = asyncio.Queue()
+        live.busy = True
+        live.attach(queue)
+        live.finalize("stopped")
+        await live.close()
+        return queue
+
+    queue = _run(scenario())
+
+    assert queue.get_nowait() is None                       # 哨兵推出来了
+    assert SessionStore(tmp_path).load(session.session_id).state.status == "stopped"

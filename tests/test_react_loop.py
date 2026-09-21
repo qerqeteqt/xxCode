@@ -258,3 +258,102 @@ def test_tools_schema_is_passed_through():
     _run(run_react_loop([SYSTEM, USER], llm, FakeTools(), max_steps=10, tools=schema))
 
     assert llm.tools_seen == [schema]
+
+
+# ================================================================ 中止
+
+
+class _BlocksOnSecondCall:
+    """第 1 个工具正常返回，第 2 个挂住不返回。
+
+    这样就能把取消**精确**定位到「工具执行到一半」—— 而不是靠 sleep 撞运气。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.blocked = asyncio.Event()
+
+    async def __call__(self, tool_call: dict) -> str:
+        self.calls.append(tool_call["id"])
+        if len(self.calls) >= 2:
+            self.blocked.set()
+            await asyncio.Event().wait()   # 永远等下去，等外面来取消
+        return f"{tool_call['id']} 的结果"
+
+
+class _StallsInChat:
+    """在 LLM 调用里挂住 —— 取消落在「连 assistant 回复都还没拿到」的时候。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def chat(self, messages: list[dict], tools: list | None = None, on_delta=None) -> dict:
+        self.started.set()
+        await asyncio.Event().wait()
+
+
+def test_中止时补全工具结果让历史保持合法():
+    """用户按停止时，取消经常正好落在几个工具中间。
+
+    上面那条 assistant 已经带着 tool_calls 落盘了，少了应答它的 tool 消息，
+    历史就是坏的 —— 而 Session 是 append-only 的，坏历史删不掉，下一次调用
+    （或者 CLI 的 --continue）拿到它，API 直接 400。所以没跑完的必须补上占位结果。
+    """
+    llm = FakeLLM(
+        [
+            _assistant(
+                tool_calls=[
+                    _tool_call("Read", call_id="call_1"),
+                    _tool_call("Bash", call_id="call_2"),
+                    _tool_call("Write", call_id="call_3"),
+                ]
+            )
+        ]
+    )
+    tools = _BlocksOnSecondCall()
+    seen: list[dict] = []
+    messages = [SYSTEM, USER]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_react_loop(messages, llm, tools, max_steps=10, on_message=seen.append)
+        )
+        await tools.blocked.wait()     # 确保第 2 个工具正挂着，取消才落在工具里
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+
+    tool_msgs = [m for m in messages if m["role"] == "tool"]
+    # 三个 tool_call 全都有应答，且顺序、id 都对得上
+    assert [m["tool_call_id"] for m in tool_msgs] == ["call_1", "call_2", "call_3"]
+    # 第 1 个是真跑完的，第 2、3 个是补的
+    assert tool_msgs[0]["content"] == "call_1 的结果"
+    assert "中止" in tool_msgs[1]["content"]
+    assert "中止" in tool_msgs[2]["content"]
+    # 补写必须走 on_message —— 否则只改了内存里的 messages，JSONL 上仍然是坏的
+    assert seen == messages[2:]
+
+
+def test_在_LLM_调用中途中止不会伪造工具结果():
+    """护栏：补写只该发生在工具执行途中。
+
+    取消落在 LLM 调用里时这一步什么都还没记，这时候伪造 tool 消息反而会把
+    历史搞坏 —— 凭空多出一条没有归属的应答。
+    """
+    llm = _StallsInChat()
+    messages = [SYSTEM, USER]
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_react_loop(messages, llm, FakeTools(), max_steps=10)
+        )
+        await llm.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+
+    assert [m["role"] for m in messages] == ["system", "user"]

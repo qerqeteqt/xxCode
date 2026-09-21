@@ -449,6 +449,50 @@ def test_bash_超时被强制终止(registry):
     assert "超时" in result
 
 
+def test_bash_被中止时整棵进程树跟着死(registry, project):
+    """用户按停止时正在跑的命令，必须连着子进程一起被杀掉。
+
+    `create_subprocess_shell` 起的是一个 shell，真正干活的是它的子进程。
+    只杀 shell 的话子进程会活下来继续占着端口和文件，而且没有任何人知道它还在跑。
+    所以取消路径必须走和超时同一条 `_kill_tree`。
+
+    用标记文件而不是 tasklist 来判断，是为了跨平台且不依赖进程名。
+    `started.txt` 先出现再取消 —— 否则取消可能落在 _spawn 里，那就测不到想测的东西了。
+    """
+    command = (
+        f'"{sys.executable}" -c "'
+        "import pathlib, time; "
+        "pathlib.Path('started.txt').write_text('1'); "
+        "time.sleep(1.0); "
+        "pathlib.Path('late.txt').write_text('x')\""
+    )
+    started = project / "started.txt"
+    late = project / "late.txt"
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            registry.execute(_call("Bash", {"command": command, "timeout": 30}))
+        )
+        # 等它真的跑起来再取消
+        for _ in range(200):
+            if started.exists():
+                break
+            await asyncio.sleep(0.02)
+        else:
+            task.cancel()
+            raise AssertionError("命令一直没起来，测不了取消")
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # 如果进程树没被杀干净，它会在 1 秒后写下 late.txt
+        await asyncio.sleep(1.3)
+
+    _run(scenario())
+
+    assert not late.exists(), "被中止的命令还活着，把 late.txt 写出来了"
+
+
 def test_bash_危险命令不执行(registry):
     result = _run(registry.execute(_call("Bash", {"command": "rm -rf /"})))
     assert "被拒绝" in result

@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from app.agent.main_agent import MainAgent
-from app.agent.react_loop import MaxIterationError
+from app.agent.react_loop import MaxIterationError, last_progress
 from app.context.compactor import ContextCompactor
 from app.events import Event
 from app.llm.client import LLMClient
@@ -134,6 +134,11 @@ class LiveSession:
         self.session = session
         self.busy = False
         self._queue: asyncio.Queue | None = None
+        # 用户按了停止。存在的理由是「取消」这个信号本身不带原因 ——
+        # 服务端要关闭时抛的也是 CancelledError，靠这个标志位才分得清
+        self.stop_requested = False
+        # 正在跑的 run() 任务。不存下来就没有任何东西够得着它去取消
+        self._task: asyncio.Task | None = None
 
         self.llm = LLMClient(
             api_key=settings.llm_api_key,
@@ -214,6 +219,29 @@ class LiveSession:
         finally:
             PENDING.pop(request_id, None)
 
+    def finalize(self, status: str) -> None:
+        """一轮的收尾：记用量、落状态、放开 busy、推结束哨兵。
+
+        **全程同步，一个 await 都没有。** 这一点是刻意的 —— 收尾经常是在取消
+        路径上跑的，只要中间有一个 await，第二次取消就能把它切成两半，留下
+        「busy 已经放开但状态没落」这种半截状态。
+
+        没写成 async 还有个直接好处：`/api/stop` 可以在 cancel 之后无条件调它
+        （见那条注释里说的「cancel 落在第一步之前」）。
+        """
+        self.session.record_usage(
+            self.llm.usage.prompt_tokens,
+            self.llm.usage.completion_tokens,
+            self.llm.usage.calls,
+        )
+        self.session.finish(status)
+        self.busy = False
+        self._task = None
+        # 哨兵必须在 detach 之前推 —— detach 之后 _queue 就没了，推什么都丢
+        if self._queue is not None:
+            self._queue.put_nowait(None)
+        self.detach()
+
     async def close(self) -> None:
         await self.llm.aclose()
 
@@ -224,6 +252,10 @@ class LiveSession:
 class ChatRequest(BaseModel):
     session_id: str
     question: str
+
+
+class StopRequest(BaseModel):
+    session_id: str
 
 
 class DecisionRequest(BaseModel):
@@ -447,11 +479,18 @@ def create_app(root: str | Path) -> FastAPI:
         queue: asyncio.Queue[Event | None] = asyncio.Queue()
         live.busy = True
         live.attach(queue)
+        # 每轮都要清掉上一轮的停止标记。不清的话，上一轮那个 True 会让这一轮
+        # 服务端关闭时抛的 CancelledError 被误当成「用户按了停止」
+        live.stop_requested = False
 
         async def run() -> None:
             answer: str | None = None
+            # 状态默认 failed：下面 answer 一旦拿到就改成 finished。
+            # 这和原先的 "finished" if answer else "failed" 是同一套语义
+            status = "failed"
             try:
                 answer = await live.agent.run(payload.question)
+                status = "finished"
                 queue.put_nowait(
                     Event(
                         "done",
@@ -480,6 +519,30 @@ def create_app(root: str | Path) -> FastAPI:
                         },
                     )
                 )
+            except asyncio.CancelledError:
+                # 用户按了停止（或服务端在关闭）。**必须原样抛出** ——
+                # 吞掉 CancelledError 会破坏 Task 的取消语义，外层 await 的
+                # 就不再是一次取消，uvicorn 的关闭流程也会变得诡异。
+                #
+                # 事件要在这里推，不能挪到 finally：finalize 里的 detach()
+                # 会把 _queue 清掉，之后推的东西全丢。
+                #
+                # 只在 answer is None 时报「已中止」：答案已经发给用户之后再
+                # 停在记忆提取那一步，这一轮其实是**完成**的 —— 报 stopped
+                # 既让会话列表说谎，又会给前端一个没东西可继续的「继续」按钮。
+                if live.stop_requested and answer is None:
+                    status = "stopped"
+                    try:
+                        partial = last_progress(live.session.load_messages())
+                    except Exception:  # noqa: BLE001 —— 报告失败不能盖掉取消本身
+                        partial = ""
+                    queue.put_nowait(
+                        Event(
+                            "stopped",
+                            {"partial": partial, "can_continue": True},
+                        )
+                    )
+                raise
             except Exception as e:  # noqa: BLE001 —— 出错要送回浏览器，不能让流干挂着
                 logger.exception("会话执行出错")
                 queue.put_nowait(
@@ -488,17 +551,9 @@ def create_app(root: str | Path) -> FastAPI:
             finally:
                 # 状态要如实写：原先这里不管成败都写 "finished"，
                 # 结果撞上限中断的会话在列表里显示成正常结束 —— 查问题时会误导
-                live.session.record_usage(
-                    live.llm.usage.prompt_tokens,
-                    live.llm.usage.completion_tokens,
-                    live.llm.usage.calls,
-                )
-                live.session.finish("finished" if answer else "failed")
-                live.busy = False
-                live.detach()
-                queue.put_nowait(None)  # 结束哨兵
+                live.finalize(status)
 
-        task = asyncio.create_task(run())
+        live._task = asyncio.create_task(run())
 
         async def stream() -> AsyncIterator[str]:
             try:
@@ -512,8 +567,11 @@ def create_app(root: str | Path) -> FastAPI:
                     )
             finally:
                 # 浏览器关掉页面时也会走到这儿。任务让它自己跑完 ——
-                # 半途掐掉会留下一个「正在改文件却没人知道」的烂摊子
-                if not task.done():
+                # 半途掐掉会留下一个「正在改文件却没人知道」的烂摊子。
+                #
+                # 所以停止**不能**靠断开连接实现，只能是一个显式的 /api/stop
+                # （见那个接口的注释）。这里只是记一笔
+                if live.busy:
                     logger.info("客户端断开，任务继续在后台跑完")
 
         return StreamingResponse(
@@ -521,6 +579,44 @@ def create_app(root: str | Path) -> FastAPI:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # ---------------------------------------------------------- 终止
+
+    @app.post("/api/stop")
+    async def stop(payload: StopRequest) -> dict:
+        """叫停正在跑的那一轮。
+
+        为什么必须是一个显式接口，而不是「浏览器断开连接就行」：`stream()` 的
+        finally 里刻意**不**取消任务（见那里的注释）—— 关掉页面/断开不该让一个
+        正在改文件的 Agent 半路消失。所以停止只能是用户明确表达的动作。
+        """
+        live = live_sessions.get(payload.session_id)
+        if live is None:
+            raise HTTPException(404, "这个会话不在运行")
+        if not live.busy:
+            # 已经跑完了（比如答案已给出、只剩记忆整理）。前端把非 2xx 当静默
+            # 无操作处理 —— 以 SSE 流为准，这里只是尽力而为
+            raise HTTPException(409, "这个会话没在跑")
+        if live.stop_requested:
+            return {"ok": True, "note": "已经在停了"}
+
+        live.stop_requested = True
+        task = live._task
+        if task is not None:
+            task.cancel()
+            # 用 wait 而不是 await task：
+            #   - task 的内部异常不会在这里炸成一个 500
+            #   - wait 返回时 run() 的 finally 一定已经跑完，busy 已经放开 ——
+            #     所以浏览器紧接着发下一个问题不会撞 409
+            await asyncio.wait({task})
+
+        # cancel 落在 task **第一步之前**时，协程体一行都没执行，finally 根本
+        # 不会跑 —— busy 会永久卡在 True，之后再没有任何请求能进来。
+        # busy 是个精确的探针：它由接口置 True，只由 finalize 置 False，
+        # 而上面已经等到了任务结束，所以这里不存在竞态
+        if live.busy:
+            live.finalize("stopped")
+        return {"ok": True}
 
     @app.post("/api/permission/{request_id}")
     async def decide(request_id: str, payload: DecisionRequest) -> dict:

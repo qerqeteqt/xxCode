@@ -19,6 +19,7 @@
 而不是 Loop -> Registry。
 """
 
+import asyncio
 import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -42,6 +43,10 @@ ExecuteTool = Callable[[dict], Awaitable[str]]
 
 # 每往 messages 里追加一条消息就回调一次。Session 靠它做 append-only 落盘。
 MessageHook = Callable[[dict], None]
+
+# 被用户中止、没能跑完的工具，回灌给模型的占位结果。
+# 文字要写清楚「结果未知」—— 模型下一轮会看到它，不能让它以为工具成功返回了空
+ABORTED_TOOL_RESULT = "（用户中止了这一轮：这个工具没有执行完，结果未知）"
 
 
 def last_progress(messages: list[dict]) -> str:
@@ -195,23 +200,50 @@ async def run_react_loop(
         # API 会直接报 400。
         record(msg)
 
-        for tool_call in tool_calls:
-            name = tool_call.get("function", {}).get("name")
+        # 已经拿到结果、回灌过的 tool_call_id。取消时靠它找出「哪几个还没应答」
+        done_ids: set[str] = set()
+        try:
+            for tool_call in tool_calls:
+                name = tool_call.get("function", {}).get("name")
 
-            # 工具崩了不能让整个 Runtime 崩。异常转成字符串回灌给模型，
-            # 模型看到报错通常能自己换个思路重试 —— 这是 ReAct 自愈能力的一部分。
-            try:
-                result = await execute_tool(tool_call)
-            except Exception as e:  # noqa: BLE001 —— 故意兜住所有工具异常
-                result = f"工具执行出错: {type(e).__name__}: {e}"
+                # 工具崩了不能让整个 Runtime 崩。异常转成字符串回灌给模型，
+                # 模型看到报错通常能自己换个思路重试 —— 这是 ReAct 自愈能力的一部分。
+                try:
+                    result = await execute_tool(tool_call)
+                except Exception as e:  # noqa: BLE001 —— 故意兜住所有工具异常
+                    result = f"工具执行出错: {type(e).__name__}: {e}"
 
-            record(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "content": str(result),
-                }
-            )
+                record(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": str(result),
+                    }
+                )
+                done_ids.add(tool_call["id"])
+        except asyncio.CancelledError:
+            # 用户按了停止，取消正落在这几个工具中间。**必须把每一个还没有结果的
+            # tool_call 都补上一条**：上面那条 assistant 已经带着 tool_calls 落盘了，
+            # 少了应答它的 tool 消息，历史就是坏的。而 Session 是 append-only 的 ——
+            # 坏历史已经写进 JSONL，删不掉，下一次调用（或 --continue）拿到它
+            # API 会直接 400。
+            #
+            # 用 except 而不是 finally：只有取消才该补，正常路径和工具自己报错
+            # 都不该被伪造出结果。
+            #
+            # 补完仍然要原样抛出。CancelledError 继承 BaseException，上面的
+            # except Exception 兜不住它，这里吞掉则会破坏 Task 的取消语义。
+            for tool_call in tool_calls:
+                if tool_call["id"] in done_ids:
+                    continue
+                record(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": ABORTED_TOOL_RESULT,
+                    }
+                )
+            raise
 
     # 撞上限时把最后的进展带上 —— 那通常不是一无所获，
     # 而是「查了一大堆但没来得及收尾」

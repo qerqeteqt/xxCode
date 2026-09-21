@@ -15,6 +15,7 @@ from datetime import datetime
 import pytest
 
 from app.agent.main_agent import MainAgent
+from app.llm.content import image_block
 from app.memory.session_store import (
     SESSION_DIR,
     SessionError,
@@ -22,6 +23,8 @@ from app.memory.session_store import (
     SessionStore,
 )
 from app.tools import build_default_registry
+
+NAME = "3f9a1c2b4d5e6f70.png"
 
 
 def _run(coro):
@@ -362,6 +365,45 @@ def test_超长标题被截断(tmp_path):
     session.finish("finished")
 
     assert len(SessionStore(tmp_path).list_sessions()[0].title) == 120
+
+
+def test_会话标题跳过纯图片的第一条消息(tmp_path):
+    """只贴了一堆图、一句话没说时，标题该落到第一条真有文字的消息上。
+
+    `content_to_text` 对纯图片消息返回空串，于是 `if ... and text` 不成立、
+    `title` 还是空的，循环会继续往后找 —— 这正是想要的。
+    不这么做的话标题会变成一串 {'type': 'image_url', ...} 的 repr。
+    """
+    session = SessionStore(tmp_path).create()
+    session.append_message({"role": "user", "content": [image_block(NAME)]})
+    session.append_message({"role": "user", "content": "这个报错怎么修"})
+    session.finish("finished")
+
+    info = SessionStore(tmp_path).list_sessions()[0]
+
+    assert info.title == "这个报错怎么修"
+    assert "image_url" not in info.title
+
+
+def test_整场只有图片时标题为空(tmp_path):
+    session = SessionStore(tmp_path).create()
+    session.append_message({"role": "user", "content": [image_block(NAME)]})
+    session.finish("finished")
+
+    assert SessionStore(tmp_path).list_sessions()[0].title == ""
+
+
+def test_图片加文字时标题只取文字(tmp_path):
+    session = SessionStore(tmp_path).create()
+    session.append_message(
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "看看这张截图"}, image_block(NAME)],
+        }
+    )
+    session.finish("finished")
+
+    assert SessionStore(tmp_path).list_sessions()[0].title == "看看这张截图"
 
 
 # ================================================================ 删除

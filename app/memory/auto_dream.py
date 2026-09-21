@@ -32,6 +32,7 @@ from pathlib import Path
 
 from app.agent.react_loop import MaxIterationError, run_react_loop
 from app.llm.client import LLMClient, LLMError
+from app.llm.content import content_to_text
 from app.memory.memory_manager import MemoryManager
 from app.memory.memory_tools import memory_tools
 from app.memory.session_store import SessionStore
@@ -111,11 +112,15 @@ def summarize_session(records: list[dict], session_id: str) -> str | None:
             started_at = record.get("ts", "")
         elif kind == "message":
             message = record.get("message") or {}
-            role, content = message.get("role"), message.get("content")
+            role = message.get("role")
+            # 和 extractor 同一个理由：块列表必须渲染成纯文本再往下走。
+            # 这里尤其要紧 —— 这段文字的产物会被写进 `.agent/memory/*.md`，
+            # 而那个文件之后会被注入每一轮的 system prompt
+            content = content_to_text(message.get("content"))
             if not content:
                 continue
             if role == "user":
-                questions.append(str(content))
+                questions.append(content)
             elif role == "assistant":
                 # 不断覆盖，循环结束时留下的是最后一条有内容的 assistant 发言
                 final_answer = str(content)

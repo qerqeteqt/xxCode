@@ -14,6 +14,7 @@ from app.events import EventHook
 
 from app.agent.react_loop import ExecuteTool, MessageHook, run_react_loop
 from app.llm.client import LLMClient
+from app.llm.content import build_user_content
 from app.memory.memory_manager import INDEX_LINK_PREFIX, MemoryManager
 from app.memory.session_store import Session
 from app.tools.registry import ToolRegistry
@@ -139,10 +140,20 @@ class MainAgent:
     def _message_hook(self) -> MessageHook | None:
         return self._session.append_message if self._session is not None else None
 
-    async def run(self, question: str, messages: list[dict] | None = None) -> str:
+    async def run(
+        self,
+        question: str,
+        messages: list[dict] | None = None,
+        *,
+        images: list[str] | None = None,
+    ) -> str:
         """回答一个问题。
 
         messages 传 None 时：有 session 就从它恢复历史，没有就是全新对话。
+
+        images 是图片引用名（`.agent/images/` 下的文件名）。**落盘的只有引用** ——
+        原始的 base64 要到 `LLMClient` 组 payload 那一刻才被还原出来。
+        设成仅关键字参数，是为了让所有既有的 `agent.run("问题")` 调用点一行都不用改。
 
         **system prompt 不落盘、每次现拼**，理由是它是「配置」而不是「历史」：
         它带着长期记忆的索引，而记忆是会变的。要是把它冻结进 JSONL，续会话时
@@ -159,7 +170,10 @@ class MainAgent:
         else:
             messages.insert(0, system_message)
 
-        self._record(messages, {"role": "user", "content": question})
+        self._record(
+            messages,
+            {"role": "user", "content": build_user_content(question, images)},
+        )
 
         return await run_react_loop(
             messages=messages,

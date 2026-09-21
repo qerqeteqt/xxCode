@@ -43,6 +43,7 @@ from typing import Any
 # 而不是自己拼一遍：存储层的职责是**忠实重放**，格式的定义权归制造它的那一方。
 # 两边各写一份的话，改一处忘一处就会出现「恢复出来的 Context 和当初跑的不是一回事」。
 from app.context.compactor import SUMMARY_TAG
+from app.llm.content import content_text_only
 
 logger = logging.getLogger(__name__)
 
@@ -268,9 +269,17 @@ class Session:
                 status = record.get("status", status)
             elif kind == "message" and not title:
                 message = record.get("message") or {}
-                if message.get("role") == "user" and message.get("content"):
+                # 只取文字、把图片丢掉：图片消息的 content 是块列表，直接 str()
+                # 会让标题变成一串 {'type': ...} 的 repr；而用 content_to_text
+                # 会留下 [图片] 占位符，于是「贴张图 + 打字提问」的标题变成
+                # 「[图片] 这个问题怎么修」，纯贴图的会话标题干脆就是「[图片]」。
+                # 这里要的是「用户说了什么」，所以图片该被丢掉。
+                # 顺带得到一个想要的效果：**只有图片的第一条消息会被跳过**
+                # （text 为空、title 还是空的，循环继续往后找）
+                text = content_text_only(message.get("content"))
+                if message.get("role") == "user" and text:
                     # 换行会让列表变成一个高矮不一的方块，压成一行
-                    title = " ".join(str(message["content"]).split())[:120]
+                    title = " ".join(text.split())[:120]
 
         return SessionInfo(
             session_id=self.session_id,

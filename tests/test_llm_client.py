@@ -16,6 +16,7 @@ from app.llm.client import (
     TokenUsage,
     human_tokens,
 )
+from app.llm.content import REF_PREFIX, image_block
 
 
 def _run(coro):
@@ -449,3 +450,147 @@ def test_流式忽略空行和非_data_行():
     ))
 
     assert result["content"] == "AB"
+
+
+# ================================================================ 图片引用展开
+
+
+NAME = "3f9a1c2b4d5e6f70.png"
+DATA_URL = "data:image/png;base64,AAAA"
+
+
+def _image_message(name: str = NAME) -> dict:
+    return {"role": "user", "content": [image_block(name)]}
+
+
+def _capture(seen: list, response: httpx.Response | None = None):
+    """记下每次请求体，返回固定响应。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return response if response is not None else _ok()
+    return handler
+
+
+def test_引用被展开成_data_url_发出去():
+    seen: list = []
+    llm = _client(_capture(seen), resolve_image=lambda name: DATA_URL)
+
+    _run(llm.chat([_image_message()]))
+
+    url = seen[0]["messages"][0]["content"][0]["image_url"]["url"]
+    assert url == DATA_URL
+    assert not url.startswith(REF_PREFIX)
+
+
+def test_展开不会污染原来的_messages():
+    """**这条是整个设计的哨兵。**
+
+    `payload["messages"] = messages` 是引用传递，不是拷贝。就地展开的话，
+    200 KB 的 base64 会永久留在活的 Context 里 —— 污染压缩器的摘要渲染、
+    last_progress、以及之后任何一次 re-append。所以展开必须发生在拷贝上。
+    """
+    seen: list = []
+    llm = _client(_capture(seen), resolve_image=lambda name: DATA_URL)
+    messages = [_image_message()]
+
+    _run(llm.chat(messages))
+
+    # 发出去的确实展开了
+    assert seen[0]["messages"][0]["content"][0]["image_url"]["url"] == DATA_URL
+    # 但传进来的那个对象一个字节都没变
+    assert messages[0]["content"][0]["image_url"]["url"] == f"{REF_PREFIX}{NAME}"
+
+
+def test_展开后发第二次仍然是引用():
+    """同样的 list 连发两次，第二次不能因为「上次展开过」就带着 base64。"""
+    seen: list = []
+    llm = _client(_capture(seen), resolve_image=lambda name: DATA_URL)
+    messages = [_image_message()]
+
+    _run(llm.chat(messages))
+    _run(llm.chat(messages))
+
+    for body in seen:
+        assert body["messages"][0]["content"][0]["image_url"]["url"] == DATA_URL
+    assert messages[0]["content"][0]["image_url"]["url"] == f"{REF_PREFIX}{NAME}"
+
+
+def test_没有_resolver_时引用原样发出去():
+    """不传 resolver 就是「这个 Runtime 不认引用」，不该自作聪明。"""
+    seen: list = []
+    llm = _client(_capture(seen))
+
+    _run(llm.chat([_image_message()]))
+
+    url = seen[0]["messages"][0]["content"][0]["image_url"]["url"]
+    assert url == f"{REF_PREFIX}{NAME}"
+
+
+def test_图片读不到时降级成文字而不是抛错():
+    """图片文件被手工删掉，不该让整个会话从此再也发不出去。"""
+    seen: list = []
+
+    def boom(name):
+        raise RuntimeError("文件没了")
+
+    llm = _client(_capture(seen), resolve_image=boom)
+
+    _run(llm.chat([_image_message()]))
+
+    blocks = seen[0]["messages"][0]["content"]
+    assert blocks[0]["type"] == "text"
+    assert "无法读取" in blocks[0]["text"]
+
+
+def test_非法引用名不会被拿去解析():
+    """`ref:` 后面跟着不是合法名字的东西时，原样留着 —— 交给服务端报错。"""
+    seen: list = []
+
+    def fail(name):
+        raise AssertionError(f"不该解析这个名字: {name}")
+
+    llm = _client(_capture(seen), resolve_image=fail)
+
+    _run(llm.chat([_image_message("../../.env")]))
+
+    url = seen[0]["messages"][0]["content"][0]["image_url"]["url"]
+    assert url == f"{REF_PREFIX}../../.env"
+
+
+def test_不含图片的消息不会被复制():
+    """纯文本消息保持原对象 —— 没改动就不该白建一遍 dict。"""
+    seen: list = []
+    llm = _client(_capture(seen), resolve_image=lambda name: DATA_URL)
+
+    _run(llm.chat([{"role": "user", "content": "你好"}]))
+
+    assert seen[0]["messages"][0] == {"role": "user", "content": "你好"}
+
+
+def test_流式路径也会展开引用():
+    """流式是另一个 payload 消费者，别假设它跟着整包一起改好了。"""
+    seen: list = []
+    llm = _client(_capture(seen, _sse(_delta(content="好"))), resolve_image=lambda n: DATA_URL)
+
+    _run(llm.chat([_image_message()], on_delta=lambda _: None))
+
+    url = seen[0]["messages"][0]["content"][0]["image_url"]["url"]
+    assert url == DATA_URL
+
+
+def test_文字和图片混在一起时块顺序不变():
+    """内容里混着文字和图片时，块顺序不能乱。"""
+    seen: list = []
+    llm = _client(_capture(seen), resolve_image=lambda name: DATA_URL)
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "看看"}, image_block(NAME)],
+        }
+    ]
+
+    _run(llm.chat(messages))
+
+    blocks = seen[0]["messages"][0]["content"]
+    assert blocks[0] == {"type": "text", "text": "看看"}
+    assert blocks[1]["image_url"]["url"] == DATA_URL

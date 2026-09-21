@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 
 from app.agent.react_loop import MaxIterationError, run_react_loop
 from app.llm.client import LLMClient, LLMError
+from app.llm.content import content_to_text
 from app.memory.memory_manager import MemoryManager
 from app.memory.memory_tools import ReadMemoryTool, UpdateMemoryTool, WriteMemoryTool
 from app.tools.registry import TrackingRegistry
@@ -88,11 +89,15 @@ def summarize_turn(messages: list[dict]) -> str | None:
     questions: list[str] = []
     answer = ""
     for message in messages[start:]:
-        role, content = message.get("role"), message.get("content")
+        role = message.get("role")
+        # 带图片的 user 消息 content 是块列表，渲染成纯文本 —— 下面的
+        # `if not content` 于是自动把「只发了一张图、没说话」的消息丢掉，
+        # 而这就是想要的：图片本身对「这轮有什么值得长期记住」没有价值
+        content = content_to_text(message.get("content"))
         if not content:
             continue
         if role == "user":
-            questions.append(str(content))
+            questions.append(content)
         elif role == "assistant":
             answer = str(content)  # 不断覆盖，留下最后一条
 

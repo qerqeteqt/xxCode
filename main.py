@@ -27,6 +27,7 @@ from app.memory.extractor import MemoryExtractor
 from app.context.compactor import ContextCompactor
 from app.llm.client import DeltaHook, LLMClient, human_tokens
 from app.memory import MemoryManager
+from app.memory.image_store import ImageStore
 from app.memory.session_store import Session, SessionError, SessionStore
 from app.scheduler import Scheduler
 from app.tools import (
@@ -98,6 +99,9 @@ async def _run_session(
         base_url=settings.llm_base_url,
         model=settings.llm_model,
         timeout=settings.llm_timeout,
+        # CLI 本身没有发图的入口，但 --continue 可能续上一个在网页里发过图的会话。
+        # 不接这个的话，那些 ref: 会原样发给 API，直接 400
+        resolve_image=ImageStore(root).data_url,
     ) as llm:
         if resume:
             session = store.load_latest()

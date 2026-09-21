@@ -8,6 +8,7 @@
 import asyncio
 import json
 
+from app.llm.content import REF_PREFIX, image_block
 from app.memory.auto_dream import (
     MAX_SESSIONS,
     AutoDream,
@@ -16,6 +17,8 @@ from app.memory.auto_dream import (
 from app.memory.memory_manager import MemoryManager
 from app.memory.memory_tools import memory_tools
 from app.memory.session_store import SessionStore
+
+NAME = "3f9a1c2b4d5e6f70.png"
 
 
 def _run(coro):
@@ -107,6 +110,28 @@ def test_最终回答取最后一条而不是第一条():
 def test_没有用户提问的会话不产出摘要():
     records = [{"type": "session_start", "ts": "..."}]
     assert summarize_session(records, "s1") is None
+
+
+def test_带图片的会话摘要里没有块列表():
+    """**和 extractor 那边同一个理由，而且更严重。**
+
+    AutoDream 读的是原始 JSONL 记录（`session.records()`），里面确实躺着
+    块列表。它的产物会被写进 `.agent/memory/*.md` —— 而那个文件之后**每一轮**
+    都会被注入 system prompt。一个块列表的 repr 落进去就是清不掉的长期污染。
+    """
+    records = [
+        {"type": "message", "message": {"role": "user",
+                                        "content": [{"type": "text", "text": "看看这条日志"},
+                                                    image_block(NAME)]}},
+        {"type": "message", "message": {"role": "assistant", "content": "是超时"}},
+    ]
+
+    summary = summarize_session(records, "s1")
+
+    assert "看看这条日志" in summary
+    assert "[图片]" in summary
+    assert "image_url" not in summary
+    assert REF_PREFIX not in summary
 
 
 def test_过长的回答被截断():

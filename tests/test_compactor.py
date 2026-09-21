@@ -13,10 +13,14 @@ from app.context.compactor import (
     SUMMARY_TAG,
     Compaction,
     ContextCompactor,
+    _render_transcript,
     split_point,
 )
 from app.llm.client import LLMError
+from app.llm.content import REF_PREFIX, image_block
 from app.memory.session_store import SessionStore
+
+NAME = "3f9a1c2b4d5e6f70.png"
 
 
 def _run(coro):
@@ -353,4 +357,68 @@ def test_超步数之类的旧会话不受影响(tmp_path):
     assert session.load_messages() == [
         {"role": "user", "content": "问"},
         {"role": "assistant", "content": "答"},
+    ]
+
+
+# ================================================================ 带图片的上下文
+
+
+def _image_conversation() -> list[dict]:
+    """一段中间夹着图片消息的对话。"""
+    messages: list[dict] = [
+        {"role": "system", "content": "系统提示"},
+        {"role": "user", "content": "问题0"},
+        {"role": "assistant", "content": "答案0"},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "看这张图"}, image_block(NAME)],
+        },
+    ]
+    for t in range(1, 5):
+        messages.append({"role": "assistant", "content": f"答案{t}"})
+        messages.append({"role": "user", "content": f"问题{t + 1}"})
+    return messages
+
+
+def test_摘要提示里图片渲染成占位符():
+    """块列表的 repr 直接拼进摘要 prompt 的话，整个图片块会跟着进去。
+
+    渲染函数也是会话标题和记忆提取走的同一条路，所以这条覆盖了三处。
+    """
+    out = _render_transcript(_image_conversation())
+
+    assert "[图片]" in out
+    assert "image_url" not in out
+    assert REF_PREFIX not in out
+
+
+def test_图片消息不影响_tool_切点约束():
+    """图片只出现在 user 消息里，所以「切点不能落在 tool 上」这条不受影响。"""
+    messages = _image_conversation()
+
+    cut = split_point(messages, min_keep=8)
+
+    assert cut is not None
+    assert messages[cut]["role"] != "tool"
+
+
+def test_切点落在带图片的用户消息上图片不会丢():
+    """图片在 user 消息里，而切点优先落在 user 上。
+
+    切点是「从这一条开始保留」，而一个 content 数组就是一条消息 ——
+    所以不存在「留了半个图片块」这种事，要么整体保留、要么整体进摘要。
+    """
+    llm = SummarizerLLM("摘要正文", prompt_tokens=50_000)
+    compactor = ContextCompactor(llm, threshold_tokens=40_000)
+    messages = _image_conversation()
+    before = len(messages)
+
+    _run(compactor.maybe_compact(messages))
+
+    assert len(messages) < before
+    kept = [m for m in messages if isinstance(m.get("content"), list)]
+    assert len(kept) == 1
+    assert kept[0]["content"] == [
+        {"type": "text", "text": "看这张图"},
+        image_block(NAME),
     ]

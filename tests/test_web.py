@@ -6,7 +6,9 @@
 """
 
 import asyncio
+import base64
 import json
+import re
 import threading
 
 import pytest
@@ -634,3 +636,179 @@ def test_收尾会落状态并推结束哨兵(tmp_path, monkeypatch):
 
     assert queue.get_nowait() is None                       # 哨兵推出来了
     assert SessionStore(tmp_path).load(session.session_id).state.status == "stopped"
+
+
+# ================================================================ 图片
+
+
+# 一个**真的** 1×1 红色 PNG（69 字节）。不用大 fixture 也不用手搓假字节
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ"
+    "/pLvAAAAAElFTkSuQmCC"
+)
+PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_BYTES).decode()
+
+
+def _upload(c, data: str = PNG_DATA_URL):
+    return c.post("/api/images", json={"data": data})
+
+
+def test_上传图片返回引用名(client, tmp_path):
+    c, _ = client
+
+    resp = _upload(c)
+
+    assert resp.status_code == 200
+    ref = resp.json()["ref"]
+    assert re.fullmatch(r"[0-9a-f]{16}\.png", ref), ref
+    assert resp.json()["bytes"] == len(PNG_BYTES)
+    assert (tmp_path / ".agent" / "images" / ref).exists()
+
+
+def test_上传的图片真的落盘并且能取回(client, tmp_path):
+    c, _ = client
+
+    ref = _upload(c).json()["ref"]
+
+    assert (tmp_path / ".agent" / "images" / ref).read_bytes() == PNG_BYTES
+    got = c.get(f"/api/images/{ref}")
+    assert got.status_code == 200
+    assert got.content == PNG_BYTES
+    assert got.headers["content-type"] == "image/png"
+    # 内容寻址的名字不可变，可以放心永久缓存
+    assert "immutable" in got.headers["cache-control"]
+
+
+def test_同一张图上传两次得到同一个引用(client):
+    c, _ = client
+
+    assert _upload(c).json()["ref"] == _upload(c).json()["ref"]
+
+
+def test_上传非图片被拒绝(client):
+    c, _ = client
+
+    text_bytes = "我是文本，不是图片".encode("utf-8")
+    resp = _upload(c, "data:image/png;base64," + base64.b64encode(text_bytes).decode())
+
+    assert resp.status_code == 400
+    assert "图片" in resp.json()["detail"]
+
+
+def test_上传的数据不是合法_base64_被拒绝(client):
+    c, _ = client
+
+    assert _upload(c, "这不是 base64!!!").status_code == 400
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../../.env", "..%2F..%2F.env", "C:/Windows/win.ini", "abc.png", "0123456789abcdef.exe"],
+)
+def test_读取非法名字返回_404(client, name):
+    """引用名是安全边界：它拼进文件路径，所以校验必须在拼之前。"""
+    c, _ = client
+
+    assert c.get(f"/api/images/{name}").status_code == 404
+
+
+def test_读取不存在的图片返回_404(client):
+    c, _ = client
+
+    assert c.get("/api/images/0123456789abcdef.png").status_code == 404
+
+
+def test_发消息带图片时_jsonl_里只存引用(tmp_path, monkeypatch):
+    """**这条证明整个设计的前提成立。**
+
+    图片是 160 KB 级别的二进制，如果 base64 直接落进 append-only 的 JSONL，
+    文件就会猛猛膨胀且永不删除。所以盘上必须只有 ref，
+    base64 只在发请求前那一刻存在于一份拷贝上。
+    """
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _FakeLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        ref = _upload(client).json()["ref"]
+        resp = client.post(
+            "/api/chat",
+            json={"session_id": session.session_id, "question": "看看这张图", "images": [ref]},
+        )
+        assert resp.status_code == 200
+
+    raw = session.path.read_text(encoding="utf-8")
+    assert f"ref:{ref}" in raw
+    # 关键：整个文件里不该有任何 base64
+    assert "data:image" not in raw
+    assert base64.b64encode(PNG_BYTES).decode()[:40] not in raw
+
+
+def test_历史消息接口把图片引用带回前端(tmp_path, monkeypatch):
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _FakeLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        ref = _upload(client).json()["ref"]
+        client.post(
+            "/api/chat",
+            json={"session_id": session.session_id, "question": "看看", "images": [ref]},
+        )
+        msgs = client.get(f"/api/sessions/{session.session_id}/messages").json()
+
+    first = msgs[0]
+    assert first["role"] == "user"
+    assert first["text"] == "看看"
+    assert first["images"] == [ref]
+
+
+def test_只贴图不打字也能发出去(tmp_path, monkeypatch):
+    """空 question + 有图片是正常用法，不该被拒。"""
+    import app.web.server as server
+
+    monkeypatch.setattr(server, "LLMClient", _FakeLLM)
+    session = SessionStore(tmp_path).create()
+
+    with TestClient(server.create_app(tmp_path)) as client:
+        ref = _upload(client).json()["ref"]
+        resp = client.post(
+            "/api/chat",
+            json={"session_id": session.session_id, "question": "", "images": [ref]},
+        )
+        msgs = client.get(f"/api/sessions/{session.session_id}/messages").json()
+
+    assert resp.status_code == 200
+    assert msgs[0]["text"] == ""
+    assert msgs[0]["images"] == [ref]
+
+
+@pytest.mark.parametrize("bad", ["../../.env", "abc.png", "0123456789abcdef"])
+def test_引用格式非法时_chat_返回_400(client, bad):
+    c, session = client
+
+    resp = c.post(
+        "/api/chat",
+        json={"session_id": session.session_id, "question": "看看", "images": [bad]},
+    )
+
+    assert resp.status_code == 400
+
+
+def test_引用合法但图片不存在时_chat_返回_400(client):
+    """宁可在这里拒掉，也别让它落进 JSONL 变成一个永久解析不出来的死引用。"""
+    c, session = client
+
+    resp = c.post(
+        "/api/chat",
+        json={
+            "session_id": session.session_id,
+            "question": "看看",
+            "images": ["0123456789abcdef.png"],
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "不存在" in resp.json()["detail"]

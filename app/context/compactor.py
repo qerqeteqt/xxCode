@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from app.llm.client import LLMClient, LLMError
+from app.llm.content import content_to_text
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,10 @@ def _render_transcript(messages: list[dict]) -> str:
     lines: list[str] = []
     for message in messages:
         role = message.get("role", "?")
-        content = message.get("content")
+        # content 可能是个块列表（带图片的 user 消息）。必须渲染成纯文本，
+        # 否则这里会把这个列表的 repr 整个拼进摘要 prompt —— 带上图片块就是
+        # 几百 KB。图片只留一个 [图片] 占位
+        content = content_to_text(message.get("content"))
         if content:
             lines.append(f"【{role}】{content}")
         for call in message.get("tool_calls") or []:

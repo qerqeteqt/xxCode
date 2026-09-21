@@ -47,11 +47,17 @@ IGNORED_DIRS = frozenset(
 
 # 按**相对 root 的路径**跳过的目录。和上面按名字的区别在于它能区分同名的兄弟目录。
 #
-# 唯一一条规则为什么是 .agent/sessions：Runtime 自己有两类数据 ——
+# 规则为什么是这两条：Runtime 自己在 .agent/ 下放了三类数据 ——
 #   .agent/sessions  对话流水，几千行 JSONL，对代码任务纯属噪声
+#   .agent/images    用户贴进来的截图，二进制。Glob 会把它们列成候选、
+#                    Grep 会去扫原始字节，而两者对代码任务都毫无价值
 #   .agent/memory    长期记忆的 Markdown，**是给 Agent 读的**，必须放行
 # 早先图省事把整个 .agent 一刀切掉，结果 Phase 5 要让 Agent 读记忆时就没路了。
-IGNORED_PATHS = frozenset({".agent/sessions"})
+#
+# 注意这条规则只管**遍历**（List / Glob / Grep 都走 iter_files）。
+# 直接 Read .agent/images/xxx.png 仍然读得到 —— Sandbox.resolve 不查这里。
+# 接受：图片名是 16 位内容哈希，枚举不出来，而这是个单机单用户工具。
+IGNORED_PATHS = frozenset({".agent/sessions", ".agent/images"})
 
 
 class PathOutOfSandboxError(PermissionError):

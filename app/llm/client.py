@@ -28,6 +28,8 @@ from typing import Any, TypeVar
 
 import httpx
 
+from app.llm.content import IMAGE_UNREADABLE, REF_PREFIX, is_image_name
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -168,6 +170,65 @@ def _usage_of(data: dict) -> TokenUsage:
     )
 
 
+def _expand_images(messages: list[dict], resolve: Callable[[str], str]) -> list[dict]:
+    """把 messages 里的 `ref:<name>` 展开成真正的 data URL。
+
+    **三件事都是刻意的：**
+
+    1. **返回新对象，绝不就地改。** 传进来的 `messages` 就是活的 Context，
+       而 `payload["messages"] = messages` 是引用传递。就地展开的话，200 KB 的
+       base64 会永久留在上下文里 —— 污染压缩器的摘要渲染、`last_progress`、
+       以及之后任何一次 re-append。
+
+    2. **没改动就返回原来那个 list**，不白分配。
+
+    3. **解析失败降级成文字，不往上抛。** 图片文件被手工删掉不该让整个会话
+       永久不可用（每次重试都失败）。和 `react_loop` 里「工具崩了不能毁掉整个
+       Runtime」是同一条原则。
+    """
+    out: list[dict] = []
+    changed_any = False
+
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            out.append(message)
+            continue
+
+        blocks: list[dict] = []
+        changed = False
+        for block in content:
+            url = None
+            if isinstance(block, dict) and block.get("type") == "image_url":
+                url = (block.get("image_url") or {}).get("url")
+
+            if not isinstance(url, str) or not url.startswith(REF_PREFIX):
+                blocks.append(block)
+                continue
+
+            name = url[len(REF_PREFIX) :]
+            if not is_image_name(name):
+                blocks.append(block)
+                continue
+
+            try:
+                blocks.append(
+                    {"type": "image_url", "image_url": {"url": resolve(name)}}
+                )
+            except Exception as e:  # noqa: BLE001 —— 见上面第 3 条
+                logger.warning("图片 %s 读不出来，降级成文字: %s", name, e)
+                blocks.append({"type": "text", "text": IMAGE_UNREADABLE})
+            changed = True
+
+        if changed:
+            out.append({**message, "content": blocks})
+            changed_any = True
+        else:
+            out.append(message)
+
+    return out if changed_any else messages
+
+
 class LLMClient:
     def __init__(
         self,
@@ -179,6 +240,8 @@ class LLMClient:
         max_retries: int = MAX_RETRIES,
         base_delay: float = BASE_DELAY,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        resolve_image: Callable[[str], str] | None = None,
     ) -> None:
         # httpx 拼接 base_url 时是把路径直接接上去的（/v1 + chat/completions），
         # 不补斜杠就会拼成 /v1chat/completions。末尾这个 "/" 不能省。
@@ -193,6 +256,13 @@ class LLMClient:
         self._temperature = temperature
         self.max_retries = max_retries
         self.base_delay = base_delay
+        # 把 ref:<name> 变成 data:image/...;base64,... 的回调。注入而不是 import：
+        # app/llm/client.py 是个零依赖的叶子节点，而 app/memory/__init__ →
+        # session_store → app/context/compactor → app.llm.client 已经是一条环，
+        # 反向 import 会直接在 ImportError 上炸掉。
+        # 不传（None）就是「这个 Runtime 不认引用」—— 摘要 / 记忆提取这类纯文本
+        # 调用方本来就不需要它
+        self._resolve_image = resolve_image
         # 累计用量。SubAgent / AutoDream 走的是同一个 client，所以这里统计的是
         # 「这个 client 一共花了多少」—— 对账单来说正是想要的数
         self.usage = TokenUsage()
@@ -370,9 +440,18 @@ class LLMClient:
         on_delta 给了就走流式：模型每吐出一小段文字就回调一次。
         不给就走整包（SubAgent / AutoDream 不需要流式，也少一层解析）。
         """
+        # 展开图片引用。放在这里是因为这是**唯一**组装 payload 的地方 ——
+        # 流式和整包两条路都从这一个 dict 走，所以只需要接一次。
+        # 展开的产物只挂在 payload 上，messages 本身摸都不摸（见 _expand_images）
+        outgoing = (
+            _expand_images(messages, self._resolve_image)
+            if self._resolve_image is not None
+            else messages
+        )
+
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": messages,
+            "messages": outgoing,
             "temperature": self._temperature,
         }
         if tools:

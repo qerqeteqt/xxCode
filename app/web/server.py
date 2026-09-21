@@ -26,6 +26,8 @@
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -44,8 +46,10 @@ from app.agent.react_loop import MaxIterationError, last_progress
 from app.context.compactor import ContextCompactor
 from app.events import Event
 from app.llm.client import LLMClient
+from app.llm.content import content_text_only, image_refs_of, is_image_name
 from app.memory import MemoryManager
 from app.memory.extractor import MemoryExtractor
+from app.memory.image_store import ImageError, ImageStore
 from app.memory.session_store import Session, SessionError, SessionStore
 from app.scheduler import Scheduler
 from app.tools import (
@@ -132,6 +136,7 @@ class LiveSession:
     def __init__(self, root: Path, session: Session, settings: Settings) -> None:
         self.root = root
         self.session = session
+        self.images = ImageStore(root)
         self.busy = False
         self._queue: asyncio.Queue | None = None
         # 用户按了停止。存在的理由是「取消」这个信号本身不带原因 ——
@@ -145,6 +150,9 @@ class LiveSession:
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             timeout=settings.llm_timeout,
+            # 存进 JSONL 的是图片引用，发请求前才还原成 base64。
+            # 注入而不是让 client 自己 import —— 见 client.py 里那段注释
+            resolve_image=self.images.data_url,
         )
         self.gate = PermissionGate.for_project(root, confirmer=self._confirm)
         self.registry = build_default_registry(
@@ -252,6 +260,15 @@ class LiveSession:
 class ChatRequest(BaseModel):
     session_id: str
     question: str
+    # 图片引用名（.agent/images/ 下的文件名）。只贴图不打字是正常用法，
+    # 所以 question 可以是空串 —— 前端那边的判空要一起放宽
+    images: list[str] = []
+
+
+class ImageUploadRequest(BaseModel):
+    # 前端贴图后把 File 读成 data URL 发过来。**刻意不用 multipart**：
+    # 那要引入 python-multipart，而项目其余接口全是 JSON，风格也不一致
+    data: str
 
 
 class StopRequest(BaseModel):
@@ -269,6 +286,7 @@ class ConfigRequest(BaseModel):
 def create_app(root: str | Path) -> FastAPI:
     project_root = Path(root).resolve()
     store = SessionStore(project_root)
+    images = ImageStore(project_root)
     live_sessions: dict[str, LiveSession] = {}
 
     @asynccontextmanager
@@ -376,10 +394,66 @@ def create_app(root: str | Path) -> FastAPI:
         for message in session.load_messages():
             role = message.get("role")
             if role == "user":
-                out.append({"role": "user", "text": message.get("content") or ""})
+                # 只给文字：图片是**另外**通过 images 字段给前端的，那边渲染成真缩略图。
+                # 用 content_to_text 的话「只贴图不打字」会得到一句 "[图片]"，
+                # 在缩略图旁边再显示一遍纯属重复
+                row = {
+                    "role": "user",
+                    "text": content_text_only(message.get("content")),
+                }
+                # 图片的 images 键**只在有时才加**。这不是洁癖：
+                # 无图消息的返回形状必须和以前一字不差，否则前端和测试都会莫名其妙地变
+                refs = image_refs_of(message.get("content"))
+                if refs:
+                    row["images"] = refs
+                out.append(row)
             elif role == "assistant" and message.get("content"):
                 out.append({"role": "assistant", "text": message["content"]})
         return out
+
+    # ---------------------------------------------------------- 图片
+
+    @app.post("/api/images")
+    async def upload_image(payload: ImageUploadRequest) -> dict:
+        """收一张贴进来的图，存到 `.agent/images/`，返回引用名。
+
+        **无状态**：不带 session_id。图片是内容寻址的，和哪个会话无关 ——
+        于是「贴了但没发」留下的文件也就无主，这正是我们接受的代价（见 ImageStore）。
+        """
+        raw = payload.data
+        # 前端发的是 FileReader 读出来的 data URL，把前缀剥掉
+        if raw.startswith("data:"):
+            _, _, raw = raw.partition(",")
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(400, f"图片数据不是合法的 base64：{e}") from e
+
+        try:
+            name = images.save(data)
+        except ImageError as e:
+            raise HTTPException(400, str(e)) from e
+        return {"ref": name, "bytes": len(data)}
+
+    @app.get("/api/images/{name}")
+    async def read_image(name: str) -> FileResponse:
+        """把图片还给浏览器（历史消息里的缩略图走这里）。
+
+        **这是本功能唯一真正涉及安全的一处。** 名字来自 URL 路径段，
+        会被 `%2F` / `%5C` 之类的东西绕过直觉，而它的下游是 FileResponse。
+        所以校验必须在拼路径**之前**，且校验对象是「整个名字的形状」而不是
+        「里面有没有 ..」—— 后者永远漏。
+        """
+        if not is_image_name(name):
+            raise HTTPException(404, "图片不存在")
+        path = images.path_for(name)
+        if not path.exists():
+            raise HTTPException(404, "图片不存在")
+        return FileResponse(
+            path,
+            # 名字是内容哈希，内容永不变 —— 可以放心让浏览器永久缓存
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
 
     # live 在 chat() 里才存在，必须当参数传进来 —— 嵌套函数看不到调用方的局部变量
     async def _extract_memory(queue: asyncio.Queue, live: LiveSession) -> None:
@@ -476,6 +550,14 @@ def create_app(root: str | Path) -> FastAPI:
         if live.busy:
             raise HTTPException(409, "这个会话正在跑，等它结束或开个新会话")
 
+        # 引用名在这里就挡掉，别等它落进 JSONL 变成一个永久解析不出来的死引用。
+        # 这一步是必须的：名字会跟着消息写进 append-only 的文件，事后没法修
+        for name in payload.images:
+            if not is_image_name(name):
+                raise HTTPException(400, f"非法的图片引用: {name!r}")
+            if not images.exists(name):
+                raise HTTPException(400, f"图片不存在: {name!r}")
+
         queue: asyncio.Queue[Event | None] = asyncio.Queue()
         live.busy = True
         live.attach(queue)
@@ -489,7 +571,7 @@ def create_app(root: str | Path) -> FastAPI:
             # 这和原先的 "finished" if answer else "failed" 是同一套语义
             status = "failed"
             try:
-                answer = await live.agent.run(payload.question)
+                answer = await live.agent.run(payload.question, images=payload.images)
                 status = "finished"
                 queue.put_nowait(
                     Event(

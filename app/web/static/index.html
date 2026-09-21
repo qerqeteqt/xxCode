@@ -177,6 +177,14 @@
     white-space: pre-wrap; word-break: break-word;
   }
   .who { color: var(--dim); font-size: 12px; margin-bottom: 4px; }
+  /* 气泡里的图。white-space 必须重置 —— .user-msg 是 pre-wrap，
+     子元素继承之后每张图之间会多出空白节点的间距 */
+  .user-imgs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
+               white-space: normal; line-height: 0; }
+  .user-imgs img {
+    max-width: 180px; max-height: 180px; border-radius: 6px;
+    border: 1px solid var(--border);
+  }
 
   .step-block { margin: 10px 0; }
   .step-line {
@@ -303,6 +311,19 @@
   }
   .composer { max-width: 800px; margin: 0 auto; padding: 12px 16px;
               display: flex; gap: 10px; align-items: flex-end; }
+  /* 待发送的图片。独立一行放在 .composer 上面 —— footer 是普通块，
+     所以不用动 .composer 那个 flex 行，宽度和它对齐即可 */
+  .chips { max-width: 800px; margin: 0 auto; padding: 10px 16px 0;
+           display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips[hidden] { display: none; }
+  .chip { position: relative; line-height: 0; }
+  .chip img { width: 56px; height: 56px; object-fit: cover;
+              border: 1px solid var(--border); border-radius: 6px; }
+  .chip button {
+    position: absolute; top: -6px; right: -6px; width: 18px; height: 18px;
+    padding: 0; border-radius: 50%; line-height: 1; font-size: 12px;
+    background: var(--raised); border: 1px solid var(--border);
+  }
   textarea {
     flex: 1; resize: none; background: var(--bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px;
@@ -380,8 +401,9 @@
   <main id="main"><div class="wrap" id="log"></div></main>
 
   <footer>
+    <div class="chips" id="chips" hidden></div>
     <div class="composer">
-      <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行，可直接粘贴图片）"></textarea>
       <button class="primary" id="send">发送</button>
     </div>
   </footer>
@@ -438,6 +460,9 @@ const FIELD_SPEC = {
 
 const state = {
   sessionId: null, busy: false, stopping: false, stepBlock: null, toolCards: {}, sessions: [],
+  // 已经贴好、还没发出去的图片：{ref, name, url}
+  // ref 是服务端给的引用名（已经存盘了），url 是本地的 blob，只用于即时预览
+  pending: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -566,6 +591,9 @@ async function switchTo(sessionId) {
   state.stepBlock = null;
   state.toolCards = {};
   log.innerHTML = "";
+  // 清掉待发送的图片：它们是**属于上一个会话**的待发内容，
+  // 跟着切过去就等于把 A 的截图发进 B
+  clearChips();
   renderSidebar();
 
   const msgs = await (await fetch(`/api/sessions/${sessionId}/messages`)).json();
@@ -578,7 +606,7 @@ async function switchTo(sessionId) {
     log.append(empty);
   } else {
     for (const m of msgs) {
-      if (m.role === "user") addUser(m.text);
+      if (m.role === "user") addUser(m.text, m.images);
       else {
         const block = el("div", "step-block");
         const out = el("div", "text-out");
@@ -692,12 +720,30 @@ $("toggleSide").onclick = () => $("sidebar").classList.toggle("open");
 
 // ---------------------------------------------------------------- 渲染
 
-function addUser(text) {
+function addUser(text, images) {
   const box = el("div", "user-msg");
-  box.append(el("div", "who", "你"), el("div", null, text));
+  box.append(el("div", "who", "你"));
+  // 只贴图不打字是正常用法，这时就别放一个空 div 进去（会多出一段空白）
+  if (text) box.append(el("div", null, text));
+  if (images && images.length) box.append(imageRow(images));
   log.append(box);
   state.stepBlock = null;   // 下一轮重新开块
   scrollDown();
+}
+
+// 气泡里的图片行。**用服务端的 URL 而不是本地 blob** ——
+// blob 只活在当前页面里，刷新或重开会话就没了，
+// 而这个函数同时被「刚发出去」和「恢复历史」两条路用
+function imageRow(names) {
+  const row = el("div", "user-imgs");
+  for (const name of names) {
+    const img = document.createElement("img");
+    img.src = "/api/images/" + name;
+    img.alt = "图片";
+    img.loading = "lazy";
+    row.append(img);
+  }
+  return row;
 }
 
 function addStep(step, maxSteps) {
@@ -929,21 +975,28 @@ async function send(override) {
   // override 是给「接着上次继续」按钮用的 —— 它要送一句预设的话，
   // 而不是用户刚敲在输入框里的东西
   const question = (override ?? input.value).trim();
-  if (!question || state.busy) return;
+  // 只贴图不打字是完全正常的用法，所以判空要看「文字和图片是不是都没有」。
+  // 原先只判文字，贴完图直接点发送会静默什么都不发生
+  const pending = override === undefined ? state.pending : [];
+  if ((!question && !pending.length) || state.busy) return;
 
   const empty = log.querySelector(".empty");
   if (empty) empty.remove();
 
-  addUser(question);
+  const refs = pending.map((p) => p.ref);
+  addUser(question, refs);
   input.value = "";
   autoGrow();
+  // 发送点就清空：refs 已经被服务端验过、文件也早就在盘上了，
+  // 从这里往后这轮对话只认那份落盘的引用
+  clearChips();
 
   setRunning(true);
 
   try {
     const resp = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: state.sessionId, question }),
+      body: JSON.stringify({ session_id: state.sessionId, question, images: refs }),
     });
     if (!resp.ok) {
       addError({ message: (await resp.json()).detail || resp.statusText });
@@ -1001,9 +1054,84 @@ function autoGrow() {
   t.style.height = Math.min(t.scrollHeight, 200) + "px";
 }
 
+// ---------------------------------------------------------------- 贴图
+
+// 和 ImageStore.MAX_IMAGE_BYTES 对齐。这里是**提前失败**：
+// 传到一半才被服务端拒掉，用户会以为是自己网不好
+const MAX_PASTE_BYTES = 8 * 1024 * 1024;
+
+function clearChips() {
+  for (const p of state.pending) URL.revokeObjectURL(p.url);
+  state.pending = [];
+  const box = $("chips");
+  box.innerHTML = "";
+  box.hidden = true;
+}
+
+function addChip(item) {
+  const chip = el("div", "chip");
+  const img = document.createElement("img");
+  img.src = item.url;          // 本地 blob：即时显示，不等服务器
+  const kill = el("button", null, "×");
+  kill.title = "移除";
+  kill.onclick = () => {
+    URL.revokeObjectURL(item.url);
+    state.pending = state.pending.filter((p) => p !== item);
+    chip.remove();
+    $("chips").hidden = state.pending.length === 0;
+  };
+  chip.append(img, kill);
+  $("chips").hidden = false;
+  $("chips").append(chip);
+}
+
+// 贴一张图：先上传拿到引用名，再挂一个待发送的 chip。
+// **上传必须在发送之前完成** —— MainAgent 把 user 消息同步写进 JSONL，
+// 如果引用先落盘、字节后到，那个窗口里崩掉就会留下一个永久解析不出来的死引用
+function sendPastedImage(file) {
+  if (file.size > MAX_PASTE_BYTES) {
+    toast(`图片太大（${(file.size / 1048576).toFixed(1)} MB，上限 8 MB）`);
+    return;
+  }
+  const preview = URL.createObjectURL(file);
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const resp = await fetch("/api/images", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: reader.result }),
+      });
+      const body = await resp.json();
+      if (!resp.ok) {
+        URL.revokeObjectURL(preview);
+        toast("图片没存上：" + (body.detail || resp.statusText));
+        return;
+      }
+      const item = { ref: body.ref, name: body.ref, url: preview };
+      state.pending.push(item);
+      addChip(item);
+    } catch (e) {
+      URL.revokeObjectURL(preview);
+      toast("图片没存上：" + e.message);
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
 $("input").addEventListener("input", autoGrow);
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("input").addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.items || [])]
+    .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+    .map((it) => it.getAsFile())
+    .filter(Boolean);
+  // 剪贴板里没有图片就**原样放行**，绝不要 preventDefault ——
+  // 否则普通文字粘贴就被这一行搞坏了
+  if (!files.length) return;
+  e.preventDefault();
+  files.forEach(sendPastedImage);
 });
 // 包一层：直接写 onclick = send 的话，点击事件会被当成 override 传进去
 // 同一个按钮两种职责：跑着的时候它是停止键

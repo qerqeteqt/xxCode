@@ -8,8 +8,11 @@
 import asyncio
 import json
 
+from app.llm.content import REF_PREFIX, image_block
 from app.memory.extractor import MemoryExtractor, summarize_turn
 from app.memory.memory_manager import MemoryManager
+
+NAME = "3f9a1c2b4d5e6f70.png"
 
 
 def _run(coro):
@@ -75,6 +78,46 @@ def test_还没答完时返回_None():
     ]
 
     assert summarize_turn(history) is None
+
+
+def test_带图片的一轮不会把块列表写进材料(tmp_path):
+    """**这条最要紧。**
+
+    提取出来的材料会被写进 `.agent/memory/*.md`，而那个文件之后会被注入
+    **每一轮**的 system prompt。一个块列表的 repr 落进去就是长期污染，
+    而且再也清不掉。图片本身对「有什么值得长期记住」也没有价值。
+    """
+    history = [
+        {"role": "user", "content": [{"type": "text", "text": "这个报错怎么修"},
+                                     image_block(NAME)]},
+        {"role": "assistant", "content": "改一下配置就行"},
+    ]
+    extractor = MemoryExtractor(str(tmp_path), object())
+
+    material = extractor.build_material(history)
+
+    assert "这个报错怎么修" in material
+    assert "image_url" not in material
+    assert REF_PREFIX not in material
+
+
+def test_只贴图不说话的一轮在材料里只留下占位符(tmp_path):
+    """纯图片消息如实变成「[图片]」，而不是被丢掉。
+
+    这里是**刻意保留占位符**的：提取器该知道「这轮有张截图」，
+    只是看不到内容。要守住的是别把块列表的 repr 写进去。
+    """
+    history = [
+        {"role": "user", "content": [image_block(NAME)]},
+        {"role": "assistant", "content": "看到了"},
+    ]
+    extractor = MemoryExtractor(str(tmp_path), object())
+
+    material = extractor.build_material(history)
+
+    assert "[图片]" in material
+    assert "image_url" not in material
+    assert REF_PREFIX not in material
 
 
 def test_没有用户发言时返回_None():
